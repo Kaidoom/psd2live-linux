@@ -786,6 +786,8 @@ private fun FrameWindowScope.PSD2LiveAppContent(
 		}
 
 		io.github.psd2live.ui.components.ProjectLocationDialog(state, viewModel, window)
+		val materialReimport by viewModel.materialReimportPrompt.collectAsState()
+		materialReimport?.let { MaterialReimportDialog(it, viewModel::resolveMaterialReimport) }
 		ExportDialog(
 			state = state,
 			viewModel = viewModel,

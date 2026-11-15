@@ -55,8 +55,16 @@ internal object WorkspaceLayoutOperations {
         "opacity" to range(0, 1))
 
     /** Request schemas and descriptions of the material edits. */
+    private val entryIndices = buildJsonObject {
+        put("type", "array"); put("items", integer(0, Int.MAX_VALUE)); put("uniqueItems", true)
+    }
     val materialSchemas: Map<String, JsonObject> = mapOf(
-        WorkspaceMaterialEdits.ADD to schema(state + mapOf("staging" to string(), "folder_id" to nullableString(), "as_reference" to boolean(), "reference_under" to boolean()), listOf("state", "staging")),
+        WorkspaceMaterialEdits.ADD to schema(state + mapOf("staging" to string(), "folder_id" to nullableString(), "as_reference" to boolean(), "reference_under" to boolean(),
+            "entry_indices" to entryIndices), listOf("state", "staging")),
+        WorkspaceMaterialEdits.DELETE_UNUSED to schema(state + mapOf("folder_id" to string()), listOf("state", "folder_id")),
+        WorkspaceMaterialReimport.OP to schema(state + mapOf("staging" to string(), "folder_id" to string(), "entry_indices" to entryIndices,
+            "choices" to buildJsonObject { put("type", "object"); put("additionalProperties", string()) },
+            "fit_changed_bounds" to boolean()), listOf("state", "staging", "folder_id")),
         WorkspaceMaterialEdits.FOLDER to schema(state + mapOf("name" to string(), "parent_id" to nullableString(), "id" to string()), listOf("state", "name")),
         WorkspaceMaterialEdits.MOVE to schema(state + mapOf("ids" to strings(1, 1024), "folder_id" to nullableString()), listOf("state", "ids")),
         WorkspaceMaterialEdits.RENAME to schema(state + mapOf("id" to string(), "name" to string()), listOf("state", "id", "name")),
@@ -136,6 +144,10 @@ internal object WorkspaceLayoutOperations {
         WorkspaceMaterialEdits.MOVE to "Move material items and folders into folder_id (null: the top level). A folder cannot move into itself. One history edit.",
         WorkspaceMaterialEdits.RENAME to "Rename a material item or folder. One history edit.",
         WorkspaceMaterialEdits.DELETE to "Delete material items and folders with everything in them. Refused while a layer shows one of the items; the error lists those layers. Undo brings them back. One history edit.",
+        WorkspaceMaterialEdits.DELETE_UNUSED to "Delete only unreferenced material items recursively in folder_id, pruning empty descendants but retaining the selected folder. All layer links (including deleted layers) and reference images protect their materials. One history edit.",
+        WorkspaceMaterialReimport.OP to "Reconcile staged PSD layers with an imported PSD folder. Reliable source IDs, then exact source paths match existing materials; ambiguous matches and changed bounds require explicit choices. " +
+            "entry_indices optionally selects the staged entries. choices maps zero-based incoming layer indices (after selection) to existing material IDs, @new to add, or @skip to skip. " +
+            "fit_changed_bounds explicitly permits fitting used artwork to unchanged canvas bounds. Replaces all active users through the existing image replacement path, preserving authored rigging. Missing materials are kept. One atomic history edit.",
         WorkspaceMaterialEdits.TAG to "Set, add or remove tags on material items and folders. When a material is placed, its tags and its folders' tags become the layer's tags (see layer_tag). One history edit.",
         WorkspaceMaterialEdits.RESOLUTION to "Render a vector (SVG) material at width x height pixels, its texture resolution. Every layer showing it takes the new pixels over its unchanged canvas rectangle, as layer_replace_image does. One history edit.",
         WorkspaceMaterialEdits.PLACE to "Place a material on the canvas as new source layers: an item as one layer, a folder as one layer per item in it with its subfolders as source groups, items keeping their places relative to each other. " +
@@ -205,6 +217,8 @@ internal object WorkspaceLayoutOperations {
         WorkspaceMaterialEdits.MOVE -> "Moved materials"
         WorkspaceMaterialEdits.RENAME -> "Renamed material"
         WorkspaceMaterialEdits.DELETE -> "Deleted materials"
+        WorkspaceMaterialEdits.DELETE_UNUSED -> "Deleted unused materials"
+        WorkspaceMaterialReimport.OP -> "Reimported PSD materials"
         WorkspaceMaterialEdits.TAG -> "Tagged materials"
         WorkspaceMaterialEdits.RESOLUTION -> "Set vector resolution"
         WorkspaceMaterialEdits.PLACE -> "Placed material ${request.getValue("material_id").jsonPrimitive.content}"

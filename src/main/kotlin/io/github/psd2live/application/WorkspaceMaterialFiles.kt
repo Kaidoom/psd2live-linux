@@ -75,6 +75,9 @@ internal object WorkspaceMaterialFiles {
         val tags: Set<String> = emptySet(),
         /** Placed as a reference layer by default ([io.github.psd2live.project.MaterialItem.reference]). */
         val reference: Boolean = false,
+        val sourcePath: String = "",
+        val sourceLayerId: String? = null,
+        val sourceLayerPath: List<String>? = null,
     )
 
     /**
@@ -100,7 +103,11 @@ internal object WorkspaceMaterialFiles {
             val data = Files.readAllBytes(path)
             val origin = path.name
             return when (path.extension.lowercase()) {
-                "psd" -> layered(PsdReader.read(data), folder + name(path.nameWithoutExtension, "psd"), origin, checkCancelled).map { it.copy(fileFolder = folder.size) }
+                "psd" -> {
+                    val sourcePath = path.toRealPath().toString()
+                    layered(PsdReader.read(data), folder + name(path.nameWithoutExtension, "psd"), origin, checkCancelled)
+                        .map { it.copy(fileFolder = folder.size, sourcePath = sourcePath) }
+                }
                 "cmo3" -> cmo3(data, folder + name(path.nameWithoutExtension, "cmo3"), origin, checkCancelled).map { it.copy(fileFolder = folder.size) }
                 "svg" -> listOf(vector(data.decodeToString(), name(path.nameWithoutExtension, "svg"), folder, origin))
                 else -> listOf(Entry(name(path.nameWithoutExtension, "image"), folder, MaterialKind.BITMAP, bitmap(data, path.name), origin = origin))
@@ -188,7 +195,10 @@ internal object WorkspaceMaterialFiles {
             val hidden = groups.indices.any { depth -> art.groups.firstOrNull { it.path == groups.take(depth + 1).joinToString("/") }?.visible == false }
             Entry(name(layer.name, layer.id.raw), folder + groups, MaterialKind.BITMAP, layer.raster,
                 layer.storedCanvasRect ?: LayerCanvasRect.of(layer.bounds), origin = "$origin#${layer.id.raw}",
-                opacity = layer.opacity, visible = layer.visible && !hidden, placementWidth = art.widthPx, placementHeight = art.heightPx)
+                opacity = layer.opacity, visible = layer.visible && !hidden, placementWidth = art.widthPx, placementHeight = art.heightPx,
+                sourceLayerId = layer.id.raw.takeIf { origin.endsWith(".psd", true) && layer.idIsStable && it.startsWith("lyid:") &&
+                    art.warnings.none { warning -> warning.startsWith("Duplicate PSD layer ID") } },
+                sourceLayerPath = if (origin.endsWith(".psd", true)) layer.groupPath.split('/').filter { it.isNotEmpty() } + layer.name else null)
         }
 
     /** [raw] as a material name: printable, at most 128 characters, [fallback] when nothing is left. */

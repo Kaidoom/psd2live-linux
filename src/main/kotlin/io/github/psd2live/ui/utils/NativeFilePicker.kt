@@ -151,6 +151,9 @@ object NativeFilePicker {
 	fun choosePsdFile(window: Window? = null, initialPath: String? = null): String? =
 		chooseSourceFile(window, initialPath, listOf("psd", "json", "zip"), tr("dialog.choosePsd"), tr("dialog.psdFilter"))
 
+	fun chooseReimportPsdFile(window: Window? = null, initialPath: String? = null): String? =
+		chooseSourceFile(window, initialPath, listOf("psd"), tr("materials.reimport.title"), "Photoshop (*.psd)")
+
 	fun chooseJsonFile(window: Window? = null, title: String): String? =
         chooseSourceFile(window, null, listOf("json"), title, "JSON (*.json)")
 

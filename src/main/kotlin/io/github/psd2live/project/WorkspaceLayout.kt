@@ -182,7 +182,8 @@ enum class MaterialKind { BITMAP, VECTOR }
  * A folder of the material library. A null [parentId] puts it at the top. [origin] names the file it was read from
  * (a PSD or CMO3, whose layers it holds); empty for a folder made in the library or read from a directory.
  */
-data class MaterialFolder(val id: String, val name: String, val parentId: String?, val tags: Set<String> = emptySet(), val origin: String = "")
+data class MaterialFolder(val id: String, val name: String, val parentId: String?, val tags: Set<String> = emptySet(), val origin: String = "",
+	val sourcePath: String = "")
 
 /**
  * One material: a raster, or a vector drawing with the raster it is rendered to at its texture resolution
@@ -206,6 +207,9 @@ data class MaterialItem(
 	val placementHeight: Int = 0,
 	/** Placed as a reference layer unless the placement says otherwise ([WorkspaceLayout.referenceLayerIds]). */
 	val reference: Boolean = false,
+	/** Reimport identity; absent in older projects. Only reliable PSD IDs are retained here. */
+	val sourceLayerId: String? = null,
+	val sourceLayerPath: List<String>? = null,
 ) {
 	init {
 		require(kind != MaterialKind.VECTOR || svg != null) { "A vector material keeps its drawing" }
@@ -315,6 +319,7 @@ internal object WorkspaceLayoutCodec {
 					folder.parentId?.let { put("parentId", it) }
 					if (folder.tags.isNotEmpty()) putJsonArray("tags") { folder.tags.sorted().forEach { add(JsonPrimitive(it)) } }
 					if (folder.origin.isNotEmpty()) put("origin", folder.origin)
+					if (folder.sourcePath.isNotEmpty()) put("sourcePath", folder.sourcePath)
 				} }
 			}
 			putJsonArray("items") {
@@ -332,6 +337,8 @@ internal object WorkspaceLayoutCodec {
 					if (item.opacity != 1f) put("opacity", item.opacity)
 					if (!item.visible) put("visible", false)
 					if (item.reference) put("reference", true)
+					item.sourceLayerId?.let { put("sourceLayerId", it) }
+					item.sourceLayerPath?.let { path -> put("sourceLayerPath", JsonArray(path.map(::JsonPrimitive))) }
 				} }
 			}
 		}
@@ -353,7 +360,8 @@ internal object WorkspaceLayoutCodec {
 				folders = value["folders"]?.jsonArray.orEmpty().map { element ->
 					val folder = element.jsonObject
 					MaterialFolder(folder.getValue("id").jsonPrimitive.content, folder.getValue("name").jsonPrimitive.content,
-						folder["parentId"]?.jsonPrimitive?.contentOrNull, strings(folder["tags"]), folder["origin"]?.jsonPrimitive?.content.orEmpty())
+						folder["parentId"]?.jsonPrimitive?.contentOrNull, strings(folder["tags"]), folder["origin"]?.jsonPrimitive?.content.orEmpty(),
+						folder["sourcePath"]?.jsonPrimitive?.content.orEmpty())
 				},
 				items = value["items"]?.jsonArray.orEmpty().map { element ->
 					val item = element.jsonObject
@@ -374,6 +382,8 @@ internal object WorkspaceLayoutCodec {
 						placementWidth = item["placementCanvas"]?.jsonArray?.get(0)?.jsonPrimitive?.int ?: 0,
 						placementHeight = item["placementCanvas"]?.jsonArray?.get(1)?.jsonPrimitive?.int ?: 0,
 						reference = item["reference"]?.jsonPrimitive?.boolean ?: false,
+						sourceLayerId = item["sourceLayerId"]?.jsonPrimitive?.contentOrNull,
+						sourceLayerPath = item["sourceLayerPath"]?.jsonArray?.map { it.jsonPrimitive.content },
 					)
 				},
 			)

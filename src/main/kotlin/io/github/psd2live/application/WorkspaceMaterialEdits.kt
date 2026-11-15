@@ -17,8 +17,8 @@ internal object WorkspaceMaterialStaging {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<WorkspaceMaterialFiles.Entry>>?) = size > 16
     }
 
-    fun stage(entries: List<WorkspaceMaterialFiles.Entry>): String {
-        require(entries.isNotEmpty()) { "Nothing to import: no supported image in the given paths" }
+    fun stage(entries: List<WorkspaceMaterialFiles.Entry>, allowEmpty: Boolean = false): String {
+        require(allowEmpty || entries.isNotEmpty()) { "Nothing to import: no supported image in the given paths" }
         val token = StableIds.stem("staged_", JsonArray(entries.map { entry -> buildJsonObject {
             put("name", entry.name); put("folder", JsonArray(entry.folder.map(::JsonPrimitive))); put("kind", entry.kind.name)
             put("raster", WorkspaceRevisions.rasterDigest(entry.raster.rgba)); put("w", entry.raster.width); put("h", entry.raster.height)
@@ -27,6 +27,10 @@ internal object WorkspaceMaterialStaging {
             put("origin", entry.origin); put("opacity", entry.opacity); put("visible", entry.visible)
             if (entry.tags.isNotEmpty()) put("tags", JsonArray(entry.tags.map(::JsonPrimitive)))
             if (entry.reference) put("reference", true)
+            put("sourcePath", entry.sourcePath)
+            put("fileFolder", entry.fileFolder)
+            entry.sourceLayerId?.let { put("sourceLayerId", it) }
+            entry.sourceLayerPath?.let { put("sourceLayerPath", JsonArray(it.map(::JsonPrimitive))) }
         } }))
         synchronized(staged) { staged[token] = entries }
         return token
@@ -34,6 +38,14 @@ internal object WorkspaceMaterialStaging {
 
     fun get(token: String): List<WorkspaceMaterialFiles.Entry> = synchronized(staged) { staged[token] }
         ?: throw IllegalArgumentException("The staged import $token is no longer held; import the files again")
+
+    /** Several source files in one transaction share one staging token, without exhausting the bounded staging cache. */
+    fun entries(request: JsonObject): List<WorkspaceMaterialFiles.Entry> {
+        val all = get(request.getValue("staging").jsonPrimitive.content)
+        val indices = request["entry_indices"]?.jsonArray?.map { it.jsonPrimitive.int } ?: return all
+        require(indices.distinct().size == indices.size && indices.all { it in all.indices }) { "Invalid staged material indices" }
+        return indices.map(all::get)
+    }
 }
 
 /**
@@ -47,6 +59,7 @@ internal object WorkspaceMaterialEdits {
     const val MOVE = "material_move"
     const val RENAME = "material_rename"
     const val DELETE = "material_delete"
+    const val DELETE_UNUSED = "material_delete_unused"
     const val TAG = "material_tag"
     const val RESOLUTION = "material_set_resolution"
     const val PLACE = "layer_place"
@@ -58,7 +71,7 @@ internal object WorkspaceMaterialEdits {
     const val ORDER_REFERENCE = "layout_order_reference"
     const val FORK = "material_fork"
     const val ADOPT = "material_adopt_layers"
-    val supported = setOf(ADD, FOLDER, MOVE, RENAME, DELETE, TAG, RESOLUTION, PLACE, UNLINK, FORK, ADOPT, REFERENCE, ADD_REFERENCE, ORDER_REFERENCE, WorkspaceReferenceModes.OP, WorkspaceReferenceOpacity.OP, CROP, MARK_REFERENCE) + WorkspaceMaterialPixels.supported +
+    val supported = setOf(ADD, FOLDER, MOVE, RENAME, DELETE, DELETE_UNUSED, WorkspaceMaterialReimport.OP, TAG, RESOLUTION, PLACE, UNLINK, FORK, ADOPT, REFERENCE, ADD_REFERENCE, ORDER_REFERENCE, WorkspaceReferenceModes.OP, WorkspaceReferenceOpacity.OP, CROP, MARK_REFERENCE) + WorkspaceMaterialPixels.supported +
         WorkspaceDrawingEdits.supported + WorkspaceMaterialPeel.supported
     const val MAX_NAME = 128
 
@@ -72,7 +85,7 @@ internal object WorkspaceMaterialEdits {
         fun optional(key: String) = request[key]?.takeUnless { it is JsonNull }?.jsonPrimitive?.content
         fun strings(key: String) = request[key]?.jsonArray?.map { it.jsonPrimitive.content }
         return when (operation.operation) {
-            ADD -> add(document, WorkspaceMaterialStaging.get(text("staging")), optional("folder_id")).let { added ->
+            ADD -> add(document, WorkspaceMaterialStaging.entries(request), optional("folder_id")).let { added ->
                 // as_reference: the first new material becomes a further reference image, fitted to the canvas.
                 if (request["as_reference"]?.jsonPrimitive?.boolean != true) added else {
                     val first = added.layout.materials.items.drop(document.layout.materials.items.size).firstOrNull()
@@ -84,6 +97,8 @@ internal object WorkspaceMaterialEdits {
             MOVE -> move(document, strings("ids").orEmpty(), optional("folder_id"))
             RENAME -> rename(document, text("id"), text("name"))
             DELETE -> delete(document, strings("ids").orEmpty())
+            DELETE_UNUSED -> deleteUnused(document, text("folder_id"))
+            WorkspaceMaterialReimport.OP -> WorkspaceMaterialReimport.apply(document, model, request, work)
             TAG -> tag(document, strings("ids").orEmpty(), strings("set"), strings("add").orEmpty(), strings("remove").orEmpty())
             UNLINK, FORK -> WorkspaceMaterialLinks.forkLayers(document, strings("layer_ids").orEmpty())
             ADOPT -> WorkspaceMaterialLinks.adopt(document, WorkspaceMaterialLinks.unlinked(document).toSet())
@@ -136,7 +151,8 @@ internal object WorkspaceMaterialEdits {
                 val existing = folders.firstOrNull { it.parentId == parent && it.name == name }
                 parent = existing?.id ?: StableIds.fresh(StableIds.stem("folder_", parent, name)) { it in ids }.also { id ->
                     ids += id
-                    folders += MaterialFolder(id, requireName(name), parent, origin = if (index == entry.fileFolder) entry.origin.substringBefore('#') else "")
+                    folders += MaterialFolder(id, requireName(name), parent, origin = if (index == entry.fileFolder) entry.origin.substringBefore('#') else "",
+                        sourcePath = if (index == entry.fileFolder) entry.sourcePath else "")
                 }
             }
             return parent
@@ -150,7 +166,8 @@ internal object WorkspaceMaterialEdits {
             val raster = entry.svg?.let { WorkspaceVectorDrawing.render(it, document.layout.drawingKit, entry.raster.width, entry.raster.height) } ?: entry.raster
             items += MaterialItem(id, requireName(entry.name), folder, entry.kind, raster, entry.placement, entry.svg,
                 origin = entry.origin, opacity = entry.opacity, visible = entry.visible,
-                placementWidth = entry.placementWidth, placementHeight = entry.placementHeight, tags = entry.tags, reference = entry.reference)
+                placementWidth = entry.placementWidth, placementHeight = entry.placementHeight, tags = entry.tags, reference = entry.reference,
+                sourceLayerId = entry.sourceLayerId, sourceLayerPath = entry.sourceLayerPath)
         }
         library = MaterialLibrary(folders, items)
         return document.withLibrary(library)
@@ -214,6 +231,33 @@ internal object WorkspaceMaterialEdits {
         val present = document.source.layers.mapTo(HashSet()) { it.id.raw } - document.deletedLayerIds
         return document.layout.layerMaterials.filter { (layer, item) -> item in itemIds && layer in present }.entries
             .groupBy({ it.value }, { it.key }).mapValues { it.value.sorted() }
+    }
+
+    /** Includes reference images and retained links of soft-deleted layers, which can be restored later. */
+    fun referencedMaterialIds(layout: WorkspaceLayout): Set<String> =
+        layout.layerMaterials.values.toSet() + layout.references.map { it.materialId }
+
+    fun unusedIds(layout: WorkspaceLayout, folderId: String): Set<String> {
+        val library = layout.materials
+        requireFolder(library, folderId)
+        val folders = library.subtree(folderId)
+        val used = referencedMaterialIds(layout)
+        return library.items.filter { it.folderId in folders && it.id !in used }.mapTo(LinkedHashSet()) { it.id }
+    }
+
+    /** One document edit; never refuses a mixed folder merely because some of its materials are used. */
+    fun deleteUnused(document: WorkspaceDocument, folderId: String): WorkspaceDocument {
+        val library = document.layout.materials
+        val remove = unusedIds(document.layout, folderId)
+        val items = library.items.filter { it.id !in remove }
+        val scope = library.subtree(folderId) - folderId
+        var folders = library.folders
+        do {
+            val previous = folders
+            val occupied = items.mapNotNull { it.folderId }.toSet() + folders.mapNotNull { it.parentId }
+            folders = folders.filter { it.id !in scope || it.id in occupied }
+        } while (folders.size != previous.size)
+        return document.withLibrary(MaterialLibrary(folders, items))
     }
 
     /** [ids] - items and folders with everything in them - removed; refused while a layer shows one of the items. */

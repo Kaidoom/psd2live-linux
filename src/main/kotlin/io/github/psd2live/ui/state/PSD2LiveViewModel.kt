@@ -6421,7 +6421,9 @@ class PSD2LiveViewModel : AutoCloseable {
 
 	/** Where system files dragged over the window would land: the panels under the pointer register their zones. */
 	val fileDrops = FileDropRouter(fallback = { carried ->
-		carried.opens?.let { FileDropIntent.Open(it, tr("drop.intent.open", openedName(it))) }
+		if (_state.value.previewModel != null && carried.files.isNotEmpty() && carried.files.all { it.extension.equals("psd", true) })
+			FileDropIntent.ImportMaterials(null, tr("materials.reimport.drop"))
+		else carried.opens?.let { FileDropIntent.Open(it, tr("drop.intent.open", openedName(it))) }
 	}, hint = ::fileDropHint)
 
 	private fun openedName(action: io.github.psd2live.ui.utils.DesktopDropTarget.DroppedAction): String = when (action) {
@@ -6597,6 +6599,11 @@ class PSD2LiveViewModel : AutoCloseable {
 	private fun layoutEdit(summary: String, operation: String, request: kotlinx.serialization.json.JsonObject) = materials.layoutEdit(summary, operation, request)
 
 	fun importMaterials(files: List<java.nio.file.Path>, folderId: String?, asReference: Boolean = false, under: Boolean = false) = materials.importMaterials(files, folderId, asReference, under)
+
+	internal val materialReimportPrompt get() = materials.reimportPrompt
+	internal fun resolveMaterialReimport(decision: MaterialReimportDecision) = materials.resolveReimport(decision)
+	fun reimportPsd(folderId: String, path: java.nio.file.Path) = materials.reimportPsd(folderId, path)
+	fun deleteUnusedMaterials(folderId: String) = materials.deleteUnusedMaterials(folderId)
 
 	fun createMaterialFolder(name: String, parentId: String?) = materials.createMaterialFolder(name, parentId)
 

@@ -5,6 +5,7 @@ import io.github.psd2live.project.MutationAuthor
 import io.github.psd2live.project.WorkspaceMutationResult
 import io.github.psd2live.i18n.tr
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.*
 
 /** Material/reference commands and pointer drafts; the runtime remains the document owner. */
@@ -173,25 +174,116 @@ internal class MaterialController(
 
 	private fun strings(values: Collection<String>) = kotlinx.serialization.json.JsonArray(values.map { kotlinx.serialization.json.JsonPrimitive(it) })
 
-	/** Reads [files] (images, PSD, CMO3 images, SVG, folders) into the material library under [folderId]: one history edit. */
-	fun importMaterials(files: List<java.nio.file.Path>, folderId: String?, asReference: Boolean = false, under: Boolean = false) {
-		if (files.isEmpty()) return
-		val workspace = documentPort()?.takeUnless { fieldsOpen() } ?: return
-		val port: io.github.psd2live.application.WorkspaceDocumentPort = workspace
-		setStatus(tr("materials.importing", files.size))
-		runWorkspaceCommand(onFinished = {}) { state ->
-			val entries = kotlinx.coroutines.withContext(Dispatchers.IO) {
-				io.github.psd2live.application.WorkspaceMaterialFiles.read(files.map { it.toAbsolutePath() })
-			}
-			val token = io.github.psd2live.application.WorkspaceMaterialStaging.stage(entries)
-			port.applyDocumentEdits(state, tr("materials.imported", entries.size), listOf(io.github.psd2live.application.WorkspaceDocumentOperation(
-				io.github.psd2live.application.WorkspaceMaterialEdits.ADD, kotlinx.serialization.json.buildJsonObject {
-					put("staging", token); folderId?.let { put("folder_id", it) }
-					if (asReference) put("as_reference", true)
-					if (asReference && under) put("reference_under", true)
-				})), MutationAuthor.USER)
-		}
-	}
+    private val _reimportPrompt = kotlinx.coroutines.flow.MutableStateFlow<MaterialReimportPrompt?>(null)
+    val reimportPrompt: kotlinx.coroutines.flow.StateFlow<MaterialReimportPrompt?> = _reimportPrompt
+    private var pendingReimport: kotlinx.coroutines.CompletableDeferred<MaterialReimportDecision>? = null
+
+    fun resolveReimport(decision: MaterialReimportDecision) { pendingReimport?.complete(decision) }
+
+    private suspend fun askReimport(prompt: MaterialReimportPrompt): MaterialReimportDecision {
+        val response = kotlinx.coroutines.CompletableDeferred<MaterialReimportDecision>()
+        kotlinx.coroutines.withContext(Dispatchers.Main) { pendingReimport = response; _reimportPrompt.value = prompt }
+        return try {
+            response.await().also { if (it == MaterialReimportDecision.Cancel) {
+                setStatus(tr("materials.reimport.cancelled"))
+                throw kotlinx.coroutines.CancellationException("PSD reimport cancelled")
+            } }
+        } finally {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
+                if (pendingReimport === response) { pendingReimport = null; _reimportPrompt.value = null }
+            }
+        }
+    }
+
+    fun reimportPsd(folderId: String, path: java.nio.file.Path) = importMaterialFiles(listOf(path), null, reimportFolderId = folderId)
+
+    /** Both drop and context-menu imports prepare the same atomic material operations. */
+    fun importMaterials(files: List<java.nio.file.Path>, folderId: String?, asReference: Boolean = false, under: Boolean = false) =
+        importMaterialFiles(files, folderId, asReference, under)
+
+    private fun importMaterialFiles(files: List<java.nio.file.Path>, folderId: String?, asReference: Boolean = false,
+                                    under: Boolean = false, reimportFolderId: String? = null) {
+        if (files.isEmpty()) return
+        val workspace = documentPort()?.takeUnless { fieldsOpen() } ?: return
+        setStatus(tr("materials.importing", files.size))
+        runWorkspaceCommand(onFinished = {}) { expectedState ->
+            val entries = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val context = kotlinx.coroutines.currentCoroutineContext()
+                io.github.psd2live.application.WorkspaceMaterialFiles.read(files.map { it.toAbsolutePath().normalize() }.distinct(), context::ensureActive)
+            }
+            val layout = (workspace as? io.github.psd2live.application.WorkspaceReadPort)?.layoutState()?.layout ?: state().layout
+            val library = layout.materials
+            val used = io.github.psd2live.application.WorkspaceMaterialEdits.referencedMaterialIds(layout)
+            if (asReference) {
+                val token = io.github.psd2live.application.WorkspaceMaterialStaging.stage(entries)
+                return@runWorkspaceCommand workspace.applyDocumentEdits(expectedState, tr("materials.imported", entries.size),
+                    listOf(io.github.psd2live.application.WorkspaceDocumentOperation(io.github.psd2live.application.WorkspaceMaterialEdits.ADD,
+                        buildJsonObject { put("staging", token); folderId?.let { put("folder_id", it) }; put("as_reference", true)
+                            if (under) put("reference_under", true) })), MutationAuthor.USER)
+            }
+            require(entries.isNotEmpty() || reimportFolderId != null) { tr("materials.reimport.noLayers") }
+            val groups = if (reimportFolderId != null) listOf(entries) else entries.groupBy { entry ->
+                entry.sourcePath.takeIf { entry.fileFolder >= 0 && entry.origin.substringBefore('#').endsWith(".psd", true) }
+            }.values.toList()
+            val staged = ArrayList<io.github.psd2live.application.WorkspaceMaterialFiles.Entry>()
+            val operations = ArrayList<io.github.psd2live.application.WorkspaceDocumentOperation>()
+            val reserved = HashSet<Pair<String?, List<String>>>()
+            var updated = 0; var added = 0; var retained = 0; var skipped = 0; var reimports = 0
+            for (group in groups) {
+                val psd = reimportFolderId != null || group.firstOrNull()?.let { it.fileFolder >= 0 && it.origin.substringBefore('#').endsWith(".psd", true) } == true
+                val filename = group.firstOrNull()?.origin?.substringBefore('#') ?: files.single().fileName.toString()
+                var target = reimportFolderId
+                if (psd && target == null) {
+                    val candidates = io.github.psd2live.application.WorkspaceMaterialReimport.targets(library, group, folderId)
+                    target = candidates.automatic
+                    if (target == null && candidates.folders.isNotEmpty()) {
+                        target = (askReimport(MaterialReimportPrompt.Target(filename, candidates.folders, library, used)) as MaterialReimportDecision.Target).folderId
+                    }
+                }
+                var incoming = group
+                val plan = target?.let { io.github.psd2live.application.WorkspaceMaterialReimport.plan(library, it, group, used) }
+                val decision = if (plan == null || plan.issues.isEmpty()) MaterialReimportDecision.Layers(emptyMap(), false)
+                    else askReimport(MaterialReimportPrompt.Layers(filename, plan, library)) as MaterialReimportDecision.Layers
+                val fields = buildJsonObject {
+                    if (plan != null) {
+                        val resolved = plan.resolve(decision.choices, decision.fitChangedBounds)
+                        put("folder_id", target)
+                        put("choices", JsonObject(decision.choices.mapKeys { it.key.toString() }.mapValues { JsonPrimitive(it.value) }))
+                        put("fit_changed_bounds", decision.fitChangedBounds)
+                        updated += plan.updated(resolved)
+                        added += resolved.values.count { it == io.github.psd2live.application.WorkspaceMaterialReimport.NEW }
+                        skipped += resolved.values.count { it == io.github.psd2live.application.WorkspaceMaterialReimport.SKIP }
+                        retained += plan.retained(resolved)
+                        reimports++
+                    } else {
+                        if (psd) incoming = io.github.psd2live.application.WorkspaceMaterialReimport.separate(library, group, folderId, reserved)
+                        folderId?.let { put("folder_id", it) }
+                        added += incoming.size
+                    }
+                    put("entry_indices", JsonArray((staged.size until staged.size + incoming.size).map(::JsonPrimitive)))
+                }
+                staged += incoming
+                operations += io.github.psd2live.application.WorkspaceDocumentOperation(
+                    if (target != null) io.github.psd2live.application.WorkspaceMaterialReimport.OP else io.github.psd2live.application.WorkspaceMaterialEdits.ADD, fields)
+            }
+            val token = io.github.psd2live.application.WorkspaceMaterialStaging.stage(staged, allowEmpty = reimportFolderId != null)
+            val summary = if (reimports > 0) tr("materials.reimport.completed", updated, added, retained, skipped) else tr("materials.imported", added)
+            workspace.applyDocumentEdits(expectedState, summary, operations.map { it.copy(request = JsonObject(it.request + ("staging" to JsonPrimitive(token)))) },
+                MutationAuthor.USER).also { setStatus(summary) }
+        }
+    }
+
+    fun deleteUnusedMaterials(folderId: String) {
+        val workspace = documentPort()?.takeUnless { fieldsOpen() } ?: return
+        runWorkspaceCommand(onFinished = {}) { expectedState ->
+            val layout = (workspace as? io.github.psd2live.application.WorkspaceReadPort)?.layoutState()?.layout ?: state().layout
+            val count = io.github.psd2live.application.WorkspaceMaterialEdits.unusedIds(layout, folderId).size
+            val summary = tr("materials.unused.deleted", count)
+            workspace.applyDocumentEdits(expectedState, summary, listOf(io.github.psd2live.application.WorkspaceDocumentOperation(
+                io.github.psd2live.application.WorkspaceMaterialEdits.DELETE_UNUSED, buildJsonObject { put("folder_id", folderId) })), MutationAuthor.USER)
+                .also { setStatus(summary) }
+        }
+    }
 
 	fun createMaterialFolder(name: String, parentId: String?) = layoutEdit(tr("materials.folder.created", name), io.github.psd2live.application.WorkspaceMaterialEdits.FOLDER,
 		kotlinx.serialization.json.buildJsonObject { put("name", name); parentId?.let { put("parent_id", it) } })
@@ -268,6 +360,7 @@ internal class MaterialController(
 
 
     override fun close() {
+        pendingReimport?.cancel(); pendingReimport = null; _reimportPrompt.value = null
         cancelMaterialDrag()
         opacitySequence++
         _referenceOpacityDraft.value = null

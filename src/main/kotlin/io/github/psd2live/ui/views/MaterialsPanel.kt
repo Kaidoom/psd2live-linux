@@ -141,7 +141,7 @@ internal object MaterialThumbnails {
 
 /** A material's thumbnail at [px] pixels, a placeholder until it is made. */
 @Composable
-private fun MaterialThumbnail(raster: LayerRaster, px: Int, modifier: Modifier) {
+internal fun MaterialThumbnail(raster: LayerRaster, px: Int, modifier: Modifier) {
 	val image by produceState(MaterialThumbnails.cached(raster, px), raster, MaterialThumbnails.tier(px)) {
 		if (value == null) value = withContext(Dispatchers.Default) { MaterialThumbnails.make(raster, px) }
 	}
@@ -550,6 +550,15 @@ internal fun MaterialsPanel(state: PSD2LiveState, vm: PSD2LiveViewModel) {
 				add(MenuLine.Action(tr("materials.menu.defaultReference"), { close(); vm.markMaterialsReference(listOf(target), !allReference) },
 					enabled = items.isNotEmpty(), selected = allReference))
 				if (folder != null) {
+					if (io.github.psd2live.application.WorkspaceMaterialReimport.isPsdFolder(folder))
+						add(MenuLine.Action(tr("materials.reimport.menu"), {
+							close()
+							NativeFilePicker.chooseReimportPsdFile(window, folder.sourcePath.takeIf { it.isNotEmpty() })
+								?.let { vm.reimportPsd(folder.id, java.nio.file.Path.of(it)) }
+						}))
+					val unused = io.github.psd2live.application.WorkspaceMaterialEdits.unusedIds(state.layout, folder.id).size
+					add(MenuLine.Action(tr("materials.unused.menu"), { close(); vm.deleteUnusedMaterials(folder.id) },
+						enabled = unused > 0, trailing = unused.toString(), danger = true))
 					add(MenuLine.Action(tr("materials.folder.new"), { close(); vm.createMaterialFolder(uniqueName(library, folder.id, tr("materials.folder.default")), folder.id) }))
 					add(MenuLine.Action(tr("materials.menu.importHere"), { importInto(folder.id) }))
 					add(MenuLine.Action(tr("materials.menu.importFolderHere"), { importFolderInto(folder.id) }))
