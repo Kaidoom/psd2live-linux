@@ -12,7 +12,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /** Personal KDE integration: the chooser lives outside the JVM, so it does not load GTK alongside Skia. */
-internal object KdeProjectPicker {
+internal object KdeFilePicker {
+    enum class Kind(val extension: String, val filter: String) {
+        PROJECT("psd2live", "PSD2Live (*.psd2live *.PSD2LIVE)"),
+        PSD("psd", "Photoshop (*.psd *.PSD)"),
+    }
+
     internal data class Result(val directory: File, val handled: Boolean, val file: File? = null)
 
     @Volatile private var activeOwner: Window? = null
@@ -44,12 +49,19 @@ internal object KdeProjectPicker {
         } finally { if (process.isAlive) process.destroyForcibly() }
     }
 
-    internal fun command(ownerId: Long, directory: File, title: String): List<String> = listOf(
+    /** Reimport starts beside its source PSD when available; unknown/moved sources start in Pictures. */
+    internal fun initialDirectory(initialPath: String?, pictures: () -> File = { picturesDirectory() }): File {
+        val path = initialPath?.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.isAbsolute }
+        val directory = path?.let { if (it.isDirectory) it else it.parentFile }
+        return directory?.takeIf { it.isDirectory } ?: pictures()
+    }
+
+    internal fun command(ownerId: Long, directory: File, title: String, kind: Kind = Kind.PROJECT): List<String> = listOf(
         "kdialog", "--print-winid", "--attach", "0x${ownerId.toString(16)}", "--title", title,
-        "--getopenfilename", directory.absolutePath, "PSD2Live (*.psd2live *.PSD2LIVE)",
+        "--getopenfilename", directory.absolutePath, kind.filter,
     )
 
-    internal fun result(exitCode: Int, output: String, directory: File): Result {
+    internal fun result(exitCode: Int, output: String, directory: File, kind: Kind = Kind.PROJECT): Result {
         var remaining = output
         var shown = false
         // Qt can report both the native KDE dialog and its hidden QFileDialog wrapper before deleteLater runs.
@@ -62,7 +74,7 @@ internal object KdeProjectPicker {
         return when (exitCode) {
             0 -> Result(directory, handled = true, file = remaining.removeSuffix("\n").removeSuffix("\r")
                 .takeIf { it.isNotEmpty() }?.let(::File)?.takeIf {
-                    it.isAbsolute && it.isFile && it.name.endsWith(".psd2live", ignoreCase = true)
+                    it.isAbsolute && it.isFile && it.name.endsWith(".${kind.extension}", ignoreCase = true)
                 })
             1 -> Result(directory, handled = true) // User cancellation must not open the fallback chooser.
             else -> Result(directory, handled = false)
@@ -77,7 +89,7 @@ internal object KdeProjectPicker {
     }
 
     /** Called on the EDT. A secondary event loop keeps Compose painting while the external chooser is modal. */
-    fun open(owner: Window?, title: String): Result {
+    fun open(owner: Window?, title: String, kind: Kind = Kind.PROJECT, initialPath: String? = null): Result {
         check(EventQueue.isDispatchThread())
         val fallback = File(System.getProperty("user.home"))
         val selected = AtomicReference(Result(fallback, handled = false))
@@ -99,23 +111,23 @@ internal object KdeProjectPicker {
             Thread({
                 var directory = fallback
                 try {
-                    directory = picturesDirectory()
+                    directory = initialDirectory(initialPath)
                     selected.set(Result(directory, handled = false))
                     if (ownerId != null && !closed.get()) {
                         // --attach takes an X11 window ID. Use xcb only for this child, matching AWT/XWayland;
                         // Qt's native Wayland backend cannot attach to an X11 ID. The override is child-local;
                         // kdialog advertises Qt's --platform flag but rejects it when reparsing its raw arguments.
-                        val child = ProcessBuilder(command(ownerId, directory, title))
+                        val child = ProcessBuilder(command(ownerId, directory, title, kind))
                             .redirectError(ProcessBuilder.Redirect.INHERIT)
                             .apply { environment()["QT_QPA_PLATFORM"] = "xcb" }.start()
                         process.set(child)
                         child.outputStream.close()
                         if (closed.get()) child.destroy()
                         val output = child.inputStream.bufferedReader().use { it.readText() }
-                        selected.set(result(child.waitFor(), output, directory))
+                        selected.set(result(child.waitFor(), output, directory, kind))
                     }
                 } catch (failure: Exception) {
-                    System.err.println("KDE project picker unavailable; using Swing: ${failure.message}")
+                    System.err.println("KDE file picker unavailable; using Swing: ${failure.message}")
                     selected.set(Result(directory, handled = false))
                 } finally {
                     if (closed.get()) selected.set(Result(directory, handled = true))

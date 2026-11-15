@@ -96,6 +96,14 @@ class LinuxFilePickerTool {
                 it.approveSelection()
             }) { NativeFilePicker.choosePsdFile(window, dir.path) })
             assertNull(pick(window, { it.cancelSelection() }) { NativeFilePicker.chooseProjectFile(window, dir.path) })
+            assertEquals(psd.absolutePath, pick(window, {
+                assertEquals(dir, it.currentDirectory)
+                assertTrue(it.fileFilter.accept(psd))
+                assertFalse(it.fileFilter.accept(png))
+                it.selectedFile = psd
+                it.approveSelection()
+            }) { NativeFilePicker.chooseReimportPsdFile(window, psd.path) })
+            assertNull(pick(window, { it.cancelSelection() }) { NativeFilePicker.chooseReimportPsdFile(window, dir.path) })
             assertEquals(File(dir, "new model.psd2live").absolutePath, pick(window, {
                 assertEquals("new model.psd2live", it.selectedFile.name)
                 it.selectedFile = File(dir, "new model")

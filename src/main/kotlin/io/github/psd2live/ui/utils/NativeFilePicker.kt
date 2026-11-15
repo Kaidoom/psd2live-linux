@@ -102,6 +102,15 @@ object NativeFilePicker {
 
 	private fun List<File>.singlePath(): String? = firstOrNull()?.toPath()?.toAbsolutePath()?.normalize()?.toString()
 
+	/** KDE's external chooser and the Swing fallback share the same filter, starting folder and picker guard. */
+	private fun chooseKdeFile(window: Window?, title: String, kind: KdeFilePicker.Kind, initialPath: String? = null): String? = onPickerThread {
+		if (!isPicking.compareAndSet(false, true)) { focusOpenPicker(); return@onPickerThread null }
+		val result = try { KdeFilePicker.open(owner(window), title, kind, initialPath) }
+		finally { isPicking.set(false) }
+		if (result.handled) result.file?.toPath()?.toAbsolutePath()?.normalize()?.toString()
+		else chooseLinux(window, title, listOf(kind.extension), kind.filter, result.directory.path).singlePath()
+	}
+
 	/** The picker window on screen, while one is. */
 	@Volatile private var openPicker: Window? = null
 
@@ -121,7 +130,7 @@ object NativeFilePicker {
 	 * or beeps when it has no window yet. Returns whether one was raised.
 	 */
 	fun focusOpenPicker(): Boolean {
-		if (KdeProjectPicker.focus()) return true
+		if (KdeFilePicker.focus()) return true
 		val picker = openPicker?.takeIf { it.isShowing }
 			?: Window.getWindows().firstOrNull { it.isShowing && (it is FileDialog || it is JDialog && it.contentPane.components.any { c -> c is JFileChooser }) }
 		val raise = Runnable {
@@ -152,7 +161,8 @@ object NativeFilePicker {
 		chooseSourceFile(window, initialPath, listOf("psd", "json", "zip"), tr("dialog.choosePsd"), tr("dialog.psdFilter"))
 
 	fun chooseReimportPsdFile(window: Window? = null, initialPath: String? = null): String? =
-		chooseSourceFile(window, initialPath, listOf("psd"), tr("materials.reimport.title"), "Photoshop (*.psd)")
+		if (isLinux) chooseKdeFile(window, tr("materials.reimport.title"), KdeFilePicker.Kind.PSD, initialPath)
+		else chooseSourceFile(window, initialPath, listOf("psd"), tr("materials.reimport.title"), "Photoshop (*.psd)")
 
 	fun chooseJsonFile(window: Window? = null, title: String): String? =
         chooseSourceFile(window, null, listOf("json"), title, "JSON (*.json)")
@@ -260,13 +270,7 @@ object NativeFilePicker {
 	 * Opens the native OS file picker for selecting an existing .psd2live project file.
 	 */
 	fun chooseProjectFile(window: Window? = null, initialPath: String? = null): String? {
-		if (isLinux) return onPickerThread {
-			if (!isPicking.compareAndSet(false, true)) { focusOpenPicker(); return@onPickerThread null }
-			val result = try { KdeProjectPicker.open(owner(window), tr("project.open")) }
-			finally { isPicking.set(false) }
-			if (result.handled) result.file?.toPath()?.toAbsolutePath()?.normalize()?.toString()
-			else chooseLinux(window, tr("project.open"), listOf("psd2live"), "PSD2Live (*.psd2live)", result.directory.path).singlePath()
-		}
+		if (isLinux) return chooseKdeFile(window, tr("project.open"), KdeFilePicker.Kind.PROJECT)
 		if (!isPicking.compareAndSet(false, true)) {
 			focusOpenPicker()
 			return null
