@@ -30,6 +30,8 @@ class LinuxFilePickerTool {
     private fun withWindow(block: (ComposeWindow) -> Unit) {
         requireTools()
         assumeTrue(System.getProperty("os.name").contains("linux", ignoreCase = true) && !GraphicsEnvironment.isHeadless())
+        val previousKdePicker = System.getProperty("psd2live.kdePicker")
+        System.setProperty("psd2live.kdePicker", "false") // This tool exercises the Swing fallback.
         val window = edt {
             ComposeWindow().apply {
                 title = "PSD2Live Linux file picker regression"
@@ -39,7 +41,11 @@ class LinuxFilePickerTool {
                 isVisible = true
             }
         }
-        try { block(window) } finally { edt { window.dispose() } }
+        try { block(window) } finally {
+            edt { window.dispose() }
+            if (previousKdePicker == null) System.clearProperty("psd2live.kdePicker")
+            else System.setProperty("psd2live.kdePicker", previousKdePicker)
+        }
     }
 
     /** Drive the real modal picker through the EDT's nested loop; inspect it before approving/cancelling. */

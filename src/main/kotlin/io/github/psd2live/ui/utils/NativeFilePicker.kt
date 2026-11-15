@@ -121,6 +121,7 @@ object NativeFilePicker {
 	 * or beeps when it has no window yet. Returns whether one was raised.
 	 */
 	fun focusOpenPicker(): Boolean {
+		if (KdeProjectPicker.focus()) return true
 		val picker = openPicker?.takeIf { it.isShowing }
 			?: Window.getWindows().firstOrNull { it.isShowing && (it is FileDialog || it is JDialog && it.contentPane.components.any { c -> c is JFileChooser }) }
 		val raise = Runnable {
@@ -256,7 +257,13 @@ object NativeFilePicker {
 	 * Opens the native OS file picker for selecting an existing .psd2live project file.
 	 */
 	fun chooseProjectFile(window: Window? = null, initialPath: String? = null): String? {
-		if (isLinux) return chooseLinux(window, tr("project.open"), listOf("psd2live"), "PSD2Live (*.psd2live)", initialPath).singlePath()
+		if (isLinux) return onPickerThread {
+			if (!isPicking.compareAndSet(false, true)) { focusOpenPicker(); return@onPickerThread null }
+			val result = try { KdeProjectPicker.open(owner(window), tr("project.open")) }
+			finally { isPicking.set(false) }
+			if (result.handled) result.file?.toPath()?.toAbsolutePath()?.normalize()?.toString()
+			else chooseLinux(window, tr("project.open"), listOf("psd2live"), "PSD2Live (*.psd2live)", result.directory.path).singlePath()
+		}
 		if (!isPicking.compareAndSet(false, true)) {
 			focusOpenPicker()
 			return null
