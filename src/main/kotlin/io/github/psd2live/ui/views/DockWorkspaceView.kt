@@ -461,6 +461,7 @@ private fun FloatingDockWindow(id: String, windowState: WindowState, session: Do
                                visible: Boolean, state: PSD2LiveState, viewModel: PSD2LiveViewModel, content: @Composable () -> Unit) {
     Window(onCloseRequest = { session.returnToDock(id) }, state = windowState,
         title = title, undecorated = true, transparent = transparent, visible = visible) {
+        remember(window) { io.github.psd2live.render.WindowTransparency.configure(window, transparent) }
         DisposableEffect(window) {
             session.floatingWindows[id] = window
             onDispose { session.floatingWindows.remove(id) }

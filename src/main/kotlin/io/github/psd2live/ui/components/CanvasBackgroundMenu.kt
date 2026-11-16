@@ -71,7 +71,8 @@ fun CanvasBackgroundMenuItems(
 			}
 		}
 		CanvasBackgroundKind.TRANSPARENT -> Text(
-			text = tr("canvas.background.transparent.hint"),
+			text = tr(if (io.github.psd2live.render.WindowTransparency.needsSoftware(true))
+				"canvas.background.transparent.linuxHint" else "canvas.background.transparent.hint"),
 			style = LocalToolTypography.current.caption.copy(fontSize = 10.sp),
 			color = colors.textMuted,
 			modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),

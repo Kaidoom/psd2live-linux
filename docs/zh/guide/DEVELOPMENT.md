@@ -114,7 +114,14 @@ python3 packaging/linux/smoke-test.py build/compose/binaries/main/app/PSD2Live
 ```bash
 ./gradlew :test --tests '*NativeTitleBarTest' --tests '*BugListRegressionTest'
 PSD2LIVE_TOOLS=1 ./gradlew :test --tests '*LinuxWindowModesTool'
+./gradlew :test --tests '*WindowTransparencyTest' --tests '*FreezeWatchdogTest'
+PSD2LIVE_TOOLS=1 ./gradlew :test --tests '*DesktopBackgroundTool'
 ```
+
+Linux 的“桌面”画布背景仅对透明窗口使用软件绘制，避免 GLX 在透明窗口交换缓冲时阻塞界面。
+普通窗口保留用户选择的 GPU 渲染；切回棋盘格或纯色即可恢复，无需重启或更改全局图形设置。
+已保存的桌面背景也走同一初始化路径。图形检查覆盖主窗口、隐藏后显示的浮动面板、模式反复切换、
+透明像素和事件线程响应。打包运行时包含 `java.management`，供卡顿监测输出线程栈。
 
 图形工具检查最大化工作区、还原尺寸、外部窗口状态和单轴最大化；普通测试运行会跳过它。
 人工检查系统标题栏拖动、边角调整大小、最大化按钮与桌面快捷键，以及不同尺寸/缩放的显示器之间移动、

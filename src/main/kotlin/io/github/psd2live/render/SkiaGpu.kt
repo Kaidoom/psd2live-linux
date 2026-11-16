@@ -73,8 +73,14 @@ object SkiaGpu {
 
 	/** Makes [window] the main window once it draws; retries while Skiko is still creating its redrawer. */
 	fun capturePrimary(window: Window) {
+		if (primaryWindow.get() !== window) {
+			_primary.value = null
+			_status.value = Status.Starting
+		}
 		primaryWindow = WeakReference(window)
 		fun attempt(remaining: Int) {
+			// A window replaced for Desktop mode/language must not later reclaim the primary GPU.
+			if (primaryWindow.get() !== window) return
 			val gpu = of(window)
 			if (gpu != null) {
 				gpu.install()

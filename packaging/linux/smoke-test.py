@@ -11,6 +11,9 @@ import zipfile
 
 
 def check_classpath(app):
+    release = (app / "lib/runtime/release").read_text()
+    modules = next(line.split("=", 1)[1].strip('"').split() for line in release.splitlines() if line.startswith("MODULES="))
+    assert "java.management" in modules, "Packaged freeze diagnostics require java.management"
     directory = app / "lib/app"
     config = (directory / "PSD2Live.cfg").read_text()
     entries = [line for line in config.splitlines() if line.startswith("app.classpath=")]

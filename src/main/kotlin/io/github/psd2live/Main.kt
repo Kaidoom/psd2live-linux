@@ -271,6 +271,7 @@ private fun runGui() {
 							!NativeTitleBar.useSystemTitleBar(transparent)),
 						transparent = transparent,
 					) {
+						remember(window) { io.github.psd2live.render.WindowTransparency.configure(window, transparent) }
 						if (io.github.psd2live.ui.utils.MacShell.active && !window.isUndecorated && !NativeTitleBar.supported) {
 							io.github.psd2live.ui.utils.MacShell.installChrome(window)
 						}
