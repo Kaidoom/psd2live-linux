@@ -37,6 +37,39 @@ class GeneratedMouthDeformationScenario {
         assertTrue(nearestKeyPose(GeometryKeyforms.editingAxes(marked, "mesh", id), mapOf(open to .4f), defaults).isEmpty())
     }
 
+    @Test fun savedFedoraSourceAxesSculptReplaysAndReopensWithoutMigration(): Unit = runBlocking {
+        val document = document()
+        val model = WorkspacePreviewBuilder().build(document)
+        val original = model.rig.puppet
+        val id = model.rig.ownLayerIdByDrawableId.entries.first { it.value == "closed-mouth" }.key
+        val axes = GeometryKeyforms.axes(original, "mesh", id)
+        assertTrue(axes.none { it.parameterId == open }, "Exercise the old first-Open-axis record")
+        val key = axes.associate { it.parameterId.raw to original.parameters.single { p -> p.id == it.parameterId }.default } + (open.raw to .25f)
+        val prepared = GeometryKeyforms.prepare(original, "mesh", id, key)
+        val grid = prepared.drawables.single { it.id.raw == id }.geometryGrid!!
+        val form = grid.cells.single { cell -> grid.axes.indices.all { grid.axes[it].keys[cell.coordinate[it]] == key.getValue(grid.axes[it].parameterId.raw) } }.form
+        val points = form.positionDeltas.copyOf().also { it[0] += .02f }
+        val owner = model.modifierEvaluation!!.entries.last { entry -> entry.ownedKeyforms.any { it.id == id && it.channel == null } }.instance.id
+        val legacy = req("op" to "generated_override", "generator" to "modifier:$owner", "target" to "mesh:$id",
+            "key" to key, "source_axes" to axes.map { it.parameterId.raw }, "base" to form.positionDeltas, "points" to points)
+        val stack = RigModifierStack.fromJson(document.rigEdits.modifierStack!!)
+        val saved = document.copy(rigEdits = document.rigEdits.copy(modifierStack = stack.copy(overrides =
+            stack.overrides + (owner to (stack.overrides[owner].orEmpty() + legacy))).toJson()))
+        Studio.run(temp, saved) {
+            fun verify() {
+                val edited = puppet.drawables.single { it.id.raw == id }.geometryGrid!!
+                val cell = edited.cells.single { cell -> edited.axes.indices.all { edited.axes[it].keys[cell.coordinate[it]] == key.getValue(edited.axes[it].parameterId.raw) } }
+                assertContentEquals(points, cell.form.positionDeltas)
+                val persisted = RigModifierStack.fromJson(now.document.rigEdits.modifierStack!!)
+                assertEquals(listOf(legacy), persisted.overrides.getValue(owner), "Loading must not rewrite saved edit records")
+                assertTrue(now.model.modifierEvaluation!!.entries.flatMap { it.overrideIssues }.isEmpty())
+            }
+            verify()
+            reopen()
+            verify()
+        }
+    }
+
     @Test fun sculptedOpenAndClosedVerticesPersistAtEveryDefaultAndNewKey() = Studio.run(temp, document()) {
         val evaluator = CpuDeformationEvaluator()
         val ids = listOf("mouth", "closed-mouth").map { layer ->
@@ -63,7 +96,7 @@ class GeneratedMouthDeformationScenario {
                 val start = listOf(world[0], -world[1])
                 val activeStops = if (before.parameters.single { it.id == open }.keys?.contains(.4f) == true) stops + .4f else stops
                 val untouched = activeStops.distinct().filter { it != value }.associateWith { local(before, id, it) }
-                edit("sculpt $id vertex at $value", "canvas_deform_stroke", req("stroke" to mapOf(
+                edit("sculpt $id vertex at $value", "canvas_deform_stroke", req("correction_mode" to "absolute", "stroke" to mapOf(
                     "mode" to "deform", "action" to "brush", "pose" to key,
                     "targets" to listOf(mapOf("target" to "mesh:$id", "key" to key, "vertices" to listOf(0))),
                     "radius" to 8, "strength" to 1,
@@ -99,5 +132,22 @@ class GeneratedMouthDeformationScenario {
         assertEquals(expected, RigIrCompiler.compile(now.model))
         reopen()
         assertEquals(expected, RigIrCompiler.compile(now.model))
+        // Opt-in fixture for cross-version checks: a real project with sculpts at every mouth key.
+        System.getenv("PSD2LIVE_MOUTH_EDIT_FIXTURE")?.let { directory ->
+            val root = java.nio.file.Files.createDirectories(Path.of(directory))
+            java.nio.file.Files.copy(save(), root.resolve("sculpted.psd2live"), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            java.nio.file.Files.write(root.resolve("sculpted.rig"), io.github.psd2live.format.compile.RigIrBinary.encode(expected))
+            val plugins = io.github.psd2live.core.modifier.ModifierPluginStore.shared
+            val references = RigModifierStack.fromJson(now.document.rigEdits.modifierStack!!).instances.mapNotNull { it.plugin }.distinct()
+            plugins.retainBundledReferences(references)
+            for (reference in references) {
+                val source = plugins.findRunnable(reference)!!.directory
+                java.nio.file.Files.walk(source).use { paths -> paths.forEach { path ->
+                    val target = root.resolve("plugins").resolve(reference.digest).resolve(source.relativize(path))
+                    if (java.nio.file.Files.isDirectory(path)) java.nio.file.Files.createDirectories(target)
+                    else java.nio.file.Files.copy(path, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                } }
+            }
+        }
     }
 }

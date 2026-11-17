@@ -38,11 +38,17 @@ internal fun ClosedMouthVisibilitySection(instance: RigModifierInstance, state: 
     }) return
     val defaults = puppet.parameters.associate { it.id to it.default }
     val initial = remember(saved, closed.channelGrids) {
-        saved ?: ClosedMouthVisibility(requireNotNull(closed.channelGrids[FormChannel.OPACITY]).axes
+        saved ?: run {
+            val points = requireNotNull(closed.channelGrids[FormChannel.OPACITY]).axes
             .single { it.parameterId == ClosedMouthVisibility.PARAMETER }.keys.filter { it in 0f..1f }.map { open ->
                 ClosedMouthVisibility.Point(open, closed.channelGrids.scalarAt(FormChannel.OPACITY, closed.opacity,
                     { if (it == ClosedMouthVisibility.PARAMETER) open else defaults[it] ?: 0f }).coerceIn(0f, 1f))
-            })
+            }
+            // 3.8.2 scales generated tracks by source alpha; older workers used absolute 0/1.
+            // The editor expresses visibility relative to that artwork's fully visible value.
+            val full = maxOf(closed.opacity, points.maxOf { it.opacity }).takeIf { it > 0f } ?: 1f
+            ClosedMouthVisibility(points.map { it.copy(opacity = it.opacity / full) })
+        }
     }
     var draft by remember(state.projectOpenGeneration, instance.id, initial) { mutableStateOf(initial) }
     var selected by remember(state.projectOpenGeneration, instance.id) { mutableFloatStateOf(0f) }

@@ -26,7 +26,7 @@ internal class RigModifierSource(
     fun resolveRasters(input: RigIR, outputs: List<ModifierRasterOutput>, checkpoint: () -> Unit): RigIR =
         RigModifierRasterAssets.attach(input, outputs, config, checkpoint)
     val physicsOrder: List<String> get() = config.rigEdits.physicsOrder
-    private val stack by lazy { RigModifierStack.fromJson(requireNotNull(config.rigEdits.modifierStack)) }
+    internal val stack by lazy { RigModifierStack.fromJson(requireNotNull(config.rigEdits.modifierStack)) }
     /** Raw persisted providers, including anonymous legacy records; source candidates decide their own eligibility. */
     internal val appliedSourceCapabilities: List<ModifierCapability> get() = stack.appliedCapabilities.toList()
     private val appliedCapabilityIds: Set<String> by lazy { stack.appliedCapabilities.mapNotNullTo(HashSet()) { it.id } }
@@ -143,6 +143,8 @@ internal class RigModifierSource(
         put("name_pattern", io.github.psd2live.i18n.tr("model.drawable.seeThrough", "{meshName}"))
         put("draw_order_step", config.drawOrderStep)
         put("inverted_masks", config.runtimeTarget.supports(RuntimeFeature.ReversedMask))
+        // The native rig supports nested masks; target-specific loss is reported by the exporters.
+        put("composite_masks", true)
         putJsonArray("candidates") { seeThroughCandidates.forEach { candidate -> add(buildJsonObject {
             put("original", candidate.original); put("eyes", candidate.eyes)
             put("bangs", JsonArray(candidate.bangs.map(::JsonPrimitive)))
@@ -690,7 +692,7 @@ internal class RigModifierSource(
             val base = when {
                 chosen == null -> area.legacy.id
                 chosen.type == area.id || chosen.type.startsWith("${area.id}.") -> {
-                    val mode = chosen.config["mode"]?.jsonPrimitive?.content ?: "fitted"
+                    val mode = chosen.config["mode"]?.jsonPrimitive?.content ?: when (area.id) { "hair" -> "chains"; "body" -> "legacy"; else -> "fitted" }
                     val candidate = "${area.id}/$mode"
                     if (candidate == RigLegacyBindings.FITTED_FACE) area.legacy.id
                     else if (RigLegacyBindings.find(candidate) != null) candidate else area.legacy.id
@@ -725,7 +727,7 @@ internal class RigModifierSource(
             val tuningType = when {
                 RigLegacyBindings.find(prev.type) != null -> prev.type
                 prev.type in partTypes -> {
-                    val mode = prev.config["mode"]?.jsonPrimitive?.content ?: "fitted"
+                    val mode = prev.config["mode"]?.jsonPrimitive?.content ?: when (prev.type) { "hair" -> "chains"; "body" -> "legacy"; else -> "fitted" }
                     val candidate = "${prev.type}/$mode"
                     if (RigLegacyBindings.find(candidate) != null) candidate else "${prev.type}/legacy"
                 }
@@ -807,17 +809,17 @@ internal class RigModifierSource(
     fun skirtContext(instance: RigModifierInstance): ModifierAlgorithmContext =
         io.github.psd2live.core.modifier.source.RigStaticSourceCollector.skirtSourceInputs(
             analysis, sourceConfig(), meshCache, meshesByLayer, instance.targets.mapTo(HashSet()) { it.id },
-            sharedOutfitTargets(instance, "outfit.ribbons"), precedingExpressionIds(instance), outfitMeshContext(instance))
+            sharedOutfitTargets(instance, "outfit.ribbons"), precedingExpressionIds(instance), outfitMeshContext(instance)).withChainLabels(instance)
 
     fun ribbonsContext(instance: RigModifierInstance): ModifierAlgorithmContext =
         io.github.psd2live.core.modifier.source.RigStaticSourceCollector.ribbonsSourceInputs(
             analysis, sourceConfig(), meshCache, meshesByLayer, instance.targets.mapTo(HashSet()) { it.id },
-            sharedOutfitTargets(instance, "outfit.skirt"), precedingExpressionIds(instance), outfitMeshContext(instance))
+            sharedOutfitTargets(instance, "outfit.skirt"), precedingExpressionIds(instance), outfitMeshContext(instance)).withChainLabels(instance)
 
     fun creatureContext(instance: RigModifierInstance): ModifierAlgorithmContext =
         io.github.psd2live.core.modifier.source.RigStaticSourceCollector.creatureSourceInputs(
             analysis, sourceConfig(), meshCache, meshesByLayer, instance.targets.mapTo(HashSet()) { it.id },
-            precedingExpressionIds(instance), outfitMeshContext(instance))
+            precedingExpressionIds(instance), outfitMeshContext(instance)).withChainLabels(instance)
 
     fun workerBindingContext(instance: RigModifierInstance): ModifierAlgorithmContext {
         val spec = RigLegacyBindings.spec(instance.type)
@@ -939,6 +941,7 @@ internal class RigModifierSource(
             require(child.id != part.id && preceding.none { it.id == child.id }) { "${part.id}: duplicate child identity ${child.id}" }
             require(child.targets.all { it in part.targets }) { "${part.id}: sub-feature $childType targets must be covered by the part" }
             activePrefixes[child.id] = preceding.toList()
+            partWorkerOwners[child.id] = part
             if (childType == type) return child
             preceding += child
         }
@@ -1126,6 +1129,18 @@ internal class RigModifierSource(
         )
     }
 
+    private fun ModifierAlgorithmContext.withChainLabels(instance: RigModifierInstance): ModifierAlgorithmContext {
+        if (!BuiltinSourceContextCompatibility.supportsChainLabels(sourceWorker(instance))) return this
+        return ModifierAlgorithmContext(
+        JsonObject(values + ("chain_labels" to buildJsonObject {
+            for (word in listOf("Front", "Side", "Back", "Ahoge", "Tail", "Skirt", "Ribbon", "Pendant", "Ear", "AnimalTail", "Wing", "L", "C", "R", "Y")) {
+                put(word, io.github.psd2live.i18n.tr("model.chain.$word"))
+            }
+            put("segment", io.github.psd2live.i18n.tr("model.chain.segment", "{segment}"))
+        })), resources, upstream,
+        )
+    }
+
     fun hairChainsContext(instance: RigModifierInstance): ModifierAlgorithmContext {
         val scaffold = provider(instance)
         val frontHairSway = scaffold.config["frontHairSway"]?.jsonPrimitive?.boolean ?: true
@@ -1133,7 +1148,7 @@ internal class RigModifierSource(
         return io.github.psd2live.core.modifier.source.RigStaticSourceCollector.hairChainsSourceInputs(
             analysis, sourceConfig(), meshCache, meshesByLayer, instance.targets.mapTo(HashSet()) { it.id },
             frontHairSway, backHairSway, precedingExpressionIds(instance),
-        )
+        ).withChainLabels(instance)
     }
 
     fun hairPartContext(instance: RigModifierInstance): ModifierAlgorithmContext {
@@ -1212,7 +1227,8 @@ internal class RigModifierSource(
                 )
             }
         }
-        return RigMouthOutlineSource.capture(analysis, outlineConfig, owners, head = head, cache = meshCache).encode()
+        return RigMouthOutlineSource.capture(analysis, outlineConfig, owners, head = head, cache = meshCache,
+            legacyOwners = !BuiltinSourceContextCompatibility.supportsMouthRibbons(sourceWorker(instance))).encode()
     }
 
     fun mouthModuleContext(instance: RigModifierInstance, module: RigModule): ModifierAlgorithmContext {
@@ -1285,14 +1301,40 @@ internal class RigModifierSource(
         val followsOrNull = targetLayers.mapValues { (_, layer) ->
             if (boundFitted != null && boundFitted.covers(layer)) boundFitted.follow(layer) else null
         }
+        val outlineRibbons = if (module !in setOf(RigModules.MOUTH_VOWEL, RigModules.MOUTH_CAPTURE, RigModules.MOUTH_TONGUE) ||
+            !BuiltinSourceContextCompatibility.supportsMouthRibbons(sourceWorker(instance))) null else {
+            val foldedOutline = stack.instances.singleOrNull {
+                it.id == instance.id && it.type == "mouth" && ModifierPartConfig.enabled(it.config, "outline")
+            }?.let { partChild(it, RigModules.MOUTH_OUTLINE.id) }
+            val outlines = preceding.filter { it.type == "mouth.outline" && it.config["scaffold"] == instance.config["scaffold"] } +
+                listOfNotNull(foldedOutline)
+            if (outlines.isEmpty()) null else buildJsonArray {
+                for (outlineInstance in outlines) {
+                    val outlineInputs = io.github.psd2live.algorithms.binding.MouthOutlineInputs.decode(mouthOutlineContext(outlineInstance))
+                    val thickness = outlineInstance.config["values"]?.jsonObject?.get("thickness")?.jsonPrimitive?.floatOrNull ?: 1.5f
+                    for ((ownerId, target) in outlineInputs.targets) {
+                        if (ownerId !in targetLayers || target.rasterColumns.size < 2 || target.sides.isEmpty()) continue
+                        for (side in target.sides.sorted()) addJsonObject {
+                            put("id", outlineInstance.outputId("mouth-lip:$ownerId:$side"))
+                            put("side", side)
+                            put("thickness", thickness)
+                            put("frame", Json.encodeToJsonElement(io.github.psd2live.core.modifier.ModifierSourceBounds.serializer(), target.frame))
+                            put("columns", Json.encodeToJsonElement(
+                                kotlinx.serialization.builtins.ListSerializer(io.github.psd2live.algorithms.binding.MouthColumn.serializer()),
+                                target.rasterColumns))
+                        }
+                    }
+                }
+            }.takeIf { it.isNotEmpty() }
+        }
         return when (module) {
             RigModules.MOUTH_VOWEL -> io.github.psd2live.algorithms.binding.MouthVowelAlgorithm.context(
-                inner, followsOrNull, module.defines.associate { it.id to io.github.psd2live.i18n.tr(it.nameKey) }, folder)
+                inner, followsOrNull, module.defines.associate { it.id to io.github.psd2live.i18n.tr(it.nameKey) }, folder, outlineRibbons)
             RigModules.MOUTH_CAPTURE -> io.github.psd2live.algorithms.binding.MouthCaptureAlgorithm.context(
-                inner, followsOrNull, lippedSkin, module.defines.associate { it.id to io.github.psd2live.i18n.tr(it.nameKey) }, folder)
+                inner, followsOrNull, lippedSkin, module.defines.associate { it.id to io.github.psd2live.i18n.tr(it.nameKey) }, folder, outlineRibbons)
             RigModules.MOUTH_TONGUE -> io.github.psd2live.algorithms.binding.MouthTongueAlgorithm.context(
                 inner, targetLayers.mapValues { (_, layer) -> requireNotNull(boundFitted).follow(layer) },
-                io.github.psd2live.i18n.tr(module.defines.single().nameKey), folder)
+                io.github.psd2live.i18n.tr(module.defines.single().nameKey), folder, outlineRibbons)
             RigModules.MOUTH_SPRING -> io.github.psd2live.algorithms.binding.MouthSpringAlgorithm.context(
                 // Spring captures only the jaw overshoot. Tongue motion belongs to its own
                 // binding and does not affect the neutral/open jaw poses used by spring.
@@ -1635,6 +1677,8 @@ internal class RigModifierSource(
     }
 
     private val activePrefixes = HashMap<String, List<RigModifierInstance>>()
+    private val partWorkerOwners = HashMap<String, RigModifierInstance>()
+    private fun sourceWorker(instance: RigModifierInstance) = partWorkerOwners[instance.id] ?: instance
 
     /** Mirror ordered dependency eligibility, so a paused module cannot leak into a later source transition. */
     internal fun activeBefore(instance: RigModifierInstance): List<RigModifierInstance> = activePrefixes.getOrPut(instance.id) {

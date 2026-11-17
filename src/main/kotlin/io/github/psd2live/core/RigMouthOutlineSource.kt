@@ -24,11 +24,18 @@ internal object RigMouthOutlineSource {
         owners: Map<String, Owner>,
         head: MouthFittedInputs.Head? = null,
         cache: PreviewMeshCache? = null,
+        legacyOwners: Boolean = false,
         checkpoint: () -> Unit = {},
     ): MouthOutlineInputs {
         val original = analysis.layers.filter { it.source !is MouthLipLayer && it.source.id.raw !in config.deletedLayerIds }
         val byLayer = original.associateBy { it.source.id.raw }
-        val layered = original.any { it.semantic.tag in tags && it.semantic.role in io.github.psd2live.core.fit.FittedMouth.LIPS }
+        val tags = setOf(SemanticTag.MOUTH, SemanticTag.MOUTH_OPEN)
+        val candidates = if (!legacyOwners) MouthLipLayers.outlineOwners(original) else {
+            // Old pinned workers must still receive the outlines that their projects were built with.
+            if (original.any { it.semantic.tag in tags && it.semantic.role in io.github.psd2live.core.fit.FittedMouth.LIPS }) emptyList()
+            else original.filter { it.semantic.tag in tags && it.semantic.role == null && it.opaquePixels > 0 }
+        }
+        val eligible = candidates.mapTo(hashSetOf()) { it.source.id.raw }
         val excluded = config.rigPendingLayerIds + DepthSplit.frontLayerIds(config)
         val split = PrimitiveResolution.of(config.rigEdits)
         val rasterAlignment by lazy { MouthLipLayers.rasterAlignment(analysis, config, split) }
@@ -44,11 +51,10 @@ internal object RigMouthOutlineSource {
         val topologies = linkedMapOf<String, ModifierAlgorithmResource>()
         val topologyByLayer = hashMapOf<String, String>()
         val traces = hashMapOf<String, List<MouthColumn>>()
-        if (!layered && !config.meshOnly && !config.deferRig) for ((id, owner) in owners) {
+        if (eligible.isNotEmpty() && !config.meshOnly && !config.deferRig) for ((id, owner) in owners) {
             checkpoint()
             val layer = byLayer[owner.layer] ?: continue
-            if (owner.layer in excluded || split.isPartLayer(owner.layer) || layer.semantic.tag !in tags ||
-                layer.semantic.role != null || layer.opaquePixels == 0) continue
+            if (owner.layer !in eligible || owner.layer in excluded || split.isPartLayer(owner.layer)) continue
             val source = layer.source
             val sides = (0..1).filterTo(linkedSetOf()) { MouthLipLayer.idFor(owner.layer, it) !in config.deletedLayerIds }
             if (sides.isEmpty()) continue
@@ -94,5 +100,4 @@ internal object RigMouthOutlineSource {
 
     private fun Bounds.observation() = ModifierSourceBounds(left, top, right, bottom)
     private fun HeadCoordinateSpace.observation() = MouthOutlineInputs.Alignment(angleDegrees, pivotX, pivotY)
-    private val tags = setOf(SemanticTag.MOUTH, SemanticTag.MOUTH_OPEN)
 }

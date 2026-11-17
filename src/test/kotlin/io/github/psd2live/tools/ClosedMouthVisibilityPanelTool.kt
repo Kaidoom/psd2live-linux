@@ -30,7 +30,11 @@ class ClosedMouthVisibilityPanelTool {
         val previous = I18n.currentLanguage
         try {
             I18n.setLanguage(AppLanguage.ENGLISH, persist = false)
-            val (prepared, choices) = WorkspacePresetInitialize.prepare(Characters.closedMouthed(), WorkspaceInitialModifiers.RECOMMENDED)
+            val source = Characters.closedMouthed().let { document -> document.copy(source =
+                io.github.psd2live.project.WorkspaceSourceArt(document.source.widthPx, document.source.heightPx,
+                    document.source.layers.map { layer -> if (layer.id.raw == "closed-mouth")
+                        (layer as io.github.psd2live.project.WorkspaceSourceLayer).copy(opacity = .4f) else layer }, document.source.groups)) }
+            val (prepared, choices) = WorkspacePresetInitialize.prepare(source, WorkspaceInitialModifiers.RECOMMENDED)
             val document = WorkspacePresetInitialization.prepare(prepared, WorkspaceRasterWork.Direct, requireNotNull(choices)).first
             val model = WorkspacePreviewBuilder().build(document)
             val mouth = RigModifierStack.fromJson(document.rigEdits.modifierStack!!).instances.single { it.type == "mouth" }
@@ -86,6 +90,7 @@ class ClosedMouthVisibilityPanelTool {
                                 click(446f, 230f)
                                 val curve = io.github.psd2live.algorithms.binding.ClosedMouthVisibility.fromConfig(assertNotNull(committed))!!
                                 assertEquals(4, curve.points.size)
+                                assertEquals(1f, curve.points.first().opacity, .0001f, "Do not multiply source alpha twice")
                                 assertEquals(.2f, curve.points[1].open, .005f)
                                 assertEquals(1f, curve.points[1].opacity, .01f)
                                 assertEquals(.25f, curve.points[2].open, .005f)

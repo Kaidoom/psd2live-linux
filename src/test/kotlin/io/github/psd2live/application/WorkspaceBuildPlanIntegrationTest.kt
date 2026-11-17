@@ -120,7 +120,7 @@ class WorkspaceBuildPlanIntegrationTest {
         } finally { RigBuildProfile.recording = recording; owners.forEach { it.close() } }
     }
 
-    @Test fun failedSplitDoesNotReplacePublishedSnapshotOrPoisonTheNextCandidate() = runBlocking {
+    @Test fun failedSplitIsIsolatedAndDoesNotPoisonTheNextCandidate() = runBlocking {
         val builder = WorkspacePreviewBuilder()
         try {
             val f = fixture(builder)
@@ -130,15 +130,24 @@ class WorkspaceBuildPlanIntegrationTest {
             val snapshot = f.model.modifierEvaluation
             val other = RigIrCompiler.compile(f.model).meshes.last().id
             val badSplit = f.split.copy(config = buildJsonObject { putJsonArray("pieceIds") { add(other); add("collision-piece") } })
-            val bad = appended(f).copy(rigEdits = f.document.rigEdits.copy(modifierStack =
+            val bad = f.document.copy(rigEdits = f.document.rigEdits.copy(modifierStack =
                 RigModifierStack.fromJson(f.document.rigEdits.modifierStack!!).let {
                     it.copy(instances = it.instances + badSplit)
                 }.toJson()))
-            assertFailsWith<IllegalArgumentException> { builder.build(bad, f.model) }
-            assertEquals(captured, runtime.capture())
+            val isolated = retain(builder.build(bad, f.model))
+            val entry = isolated.modifierEvaluation!!.entries.single { it.instance.id == badSplit.id }
+            assertEquals(ModifierStatus.FAILED, entry.status)
+            assertEquals(RigIrCompiler.compile(f.model).meshes, RigIrCompiler.compile(isolated).meshes)
+            val committed = WorkspaceDocumentCommands(runtime).executeCandidate(captured.projectId, captured.state, "Invalid split",
+                MutationAuthor.USER, mutation = { _, _ -> bad })
+            val published = retain(committed.capture.model)
+            assertTrue(committed.applied)
+            assertNotEquals(captured.historyHead, committed.capture.historyHead)
+            assertEquals(committed.capture, runtime.capture())
+            assertEquivalent(isolated, published)
             assertSame(snapshot, f.model.modifierEvaluation)
             assertFalse(f.model.modifierBuildOwner!!.isClosed)
-            val valid = retain(builder.build(appended(f), f.model))
+            val valid = retain(builder.build(appended(f), published))
             assertEquivalent(retain(WorkspacePreviewBuilder(modifierCachesEnabled = false).build(appended(f))), valid)
         } finally { owners.forEach { it.close() } }
     }

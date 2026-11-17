@@ -25,8 +25,8 @@ class ClosedMouthVisibilityScenario {
     @Test fun archivedV1MouthCanCustomizeVisibilityWithoutUpdatingCode() = exercise(true, archived = true)
     @Test fun archivedFoldedMouthCanCustomizeVisibilityWithoutUpdatingCode() = exercise(false, archived = true)
 
-    @Test fun archivedFoldedOutlineFollowsTheNewCurve() = exercise(false, archived = true, outline = true)
-    @Test fun separateOutlineFollowsTheNewCurve() = exercise(true, outline = true)
+    @Test fun archivedFoldedMouthSkipsRedundantOutlinesAndKeepsVisibility() = exercise(false, archived = true, outline = true)
+    @Test fun separateMouthSkipsRedundantOutlinesAndKeepsVisibility() = exercise(true, outline = true)
 
     private fun exercise(separate: Boolean, archived: Boolean = false, outline: Boolean = false): Unit = runBlocking {
         val source = Characters.closedMouthed().let { document ->
@@ -65,7 +65,7 @@ class ClosedMouthVisibilityScenario {
                 val closedId = now.model.rig.ownLayerIdByDrawableId.entries.first { it.value == "closed-mouth" }.key
                 val ribbons = stack.instances.flatMap { MouthVisibilityCustomization.outlineOwners(it, setOf(openId)).keys }
                     .filter { id -> puppet.drawables.any { it.id.raw == id } }
-                if (outline) assertTrue(ribbons.isNotEmpty(), "Exercise real generated outline artwork")
+                if (outline) assertTrue(ribbons.isEmpty(), "3.8.2 skips redundant outlines when custom closed artwork exists")
                 val parameter = ClosedMouthVisibility.PARAMETER
                 fun alpha(id: String, value: Float): Float {
                     val drawable = puppet.drawables.single { it.id.raw == id }
@@ -74,9 +74,9 @@ class ClosedMouthVisibilityScenario {
                 }
                 for (value in listOf(0f, .025f, .05f, .25f, .5f, 1f)) {
                     val c = ClosedMouthVisibility.Default.sample(value)
-                    // No configuration means byte-compatible historical output, including old opacity semantics.
-                    assertEquals(c, alpha(closedId, value), .0001f)
-                    assertEquals(1f - c, alpha(openId, value), .0001f)
+                    // New 3.8.2 generators respect source alpha even before customizing visibility.
+                    assertEquals(.4f * c, alpha(closedId, value), .0001f)
+                    assertEquals(.65f * (1f - c), alpha(openId, value), .0001f)
                 }
                 val original = RigIrCompiler.compile(now.model)
                 reopen()
@@ -139,6 +139,14 @@ class ClosedMouthVisibilityScenario {
                 reopen()
                 verifyVisibility()
                 assertEquals(curve, ClosedMouthVisibility.fromConfig(mouth().config))
+                assertEquals(expected, RigIrCompiler.compile(now.model))
+                // 3.8.2 can bake a single node in place. Its replay already includes our opacity
+                // customization and must not apply it twice or require upgrading the saved worker.
+                edit("apply customized mouth in place", "modifier_apply", req("id" to mouth().id, "scope" to "selected"))
+                verifyVisibility()
+                assertEquals(expected, RigIrCompiler.compile(now.model))
+                reopen()
+                verifyVisibility()
                 assertEquals(expected, RigIrCompiler.compile(now.model))
             }
         } finally { if (archived && reference != null) ModifierPluginWorkers.stop(reference) }

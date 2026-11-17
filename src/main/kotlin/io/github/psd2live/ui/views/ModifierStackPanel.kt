@@ -100,6 +100,7 @@ internal fun ModifierStackPanel(state: PSD2LiveState, vm: PSD2LiveViewModel) {
     val colors = LocalToolColors.current
     var selectedId by remember { mutableStateOf<String?>(null) }
     var page by remember { mutableIntStateOf(0) }
+    var applySelectedOnly by rememberSaveable { mutableStateOf(true) }
     var editOrder by rememberSaveable { mutableStateOf(false) }
     var updatingCodeFor by remember { mutableStateOf<RigModifierInstance?>(null) }
     val selected = stack.instances.firstOrNull { it.id == selectedId } ?: stack.instances.firstOrNull()
@@ -108,7 +109,7 @@ internal fun ModifierStackPanel(state: PSD2LiveState, vm: PSD2LiveViewModel) {
     val density = LocalDensity.current
     Column(Modifier.fillMaxSize()) {
         val labels = listOf(tr("modifier.add"), tr("modifier.switch"))
-        PanelToolbar(labels = labels, iconCount = 3) { labelsShown ->
+        PanelToolbar(labels = labels, iconCount = 2) { labelsShown ->
             Box {
                 PanelToolButton(labels[0], labelsShown > 0, { vm.openModifierAddition() }, enabled, labels[0]) { IconAdd() }
                 if (vm.modifierAddition?.group == null && vm.modifierAddition != null) ModifierAdditionMenu(state, vm)
@@ -117,7 +118,6 @@ internal fun ModifierStackPanel(state: PSD2LiveState, vm: PSD2LiveViewModel) {
                 PanelToolButton(labels[1], labelsShown > 1, { vm.openModifierAddition(group = true) }, enabled, labels[1]) { IconFolder() }
                 if (vm.modifierAddition?.group != null) ModifierAdditionMenu(state, vm)
             }
-            PresetLibraryControls(state, null, enabled)
         }
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val extent = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
@@ -185,13 +185,17 @@ internal fun ModifierStackPanel(state: PSD2LiveState, vm: PSD2LiveViewModel) {
                             verticalArrangement = Arrangement.spacedBy(Spacing.Margin),
                         ) {
                             val missing = report?.get("missing_dependencies")?.jsonArray.orEmpty()
+                            val failure = report?.get("error")?.jsonPrimitive?.contentOrNull ?: stack.initializationFailures[selected.id]
+                            if (failure != null) InspectorHint(tr("modifier.failure", failure), warning = true)
                             if (missing.isNotEmpty()) InspectorHint(tr("modifier.dependencies", missing.joinToString { it.jsonPrimitive.content }), warning = true)
                             when (page) {
                                 0 -> {
+                                    if (selected.id in stack.appliedNodes) InspectorHint(tr("modifier.applied.hint")) else {
                                     ModifierSourceValues(selected, state, enabled, vm) { updatingCodeFor = it }
                                     ModifierModulePhysicsValues(selected, report, state, enabled, vm)
                                     ModifierNativeValues(selected.type, selected.config, state, enabled, vm, instanceId = selected.id) { config, captured, done ->
                                         vm.editModifier("modifier_update", buildJsonObject { put("id", selected.id); put("type", selected.type); put("config", config) }, captured, done)
+                                    }
                                     }
                                 }
                                 1 -> {
@@ -256,10 +260,53 @@ internal fun ModifierStackPanel(state: PSD2LiveState, vm: PSD2LiveViewModel) {
                                         }
                                     }
                                     report?.let { ModifierContributions(it, state, vm) }
+                                    CompactTabBar(listOf(tr("modifier.apply.selected"), tr("modifier.apply")),
+                                        if (applySelectedOnly) 0 else 1, { applySelectedOnly = it == 0 })
+                                    if (applySelectedOnly) InspectorHint(tr("modifier.apply.selectedHint"))
+                                    val applyPlan = remember(stack, selected.id, reports, applySelectedOnly) {
+                                        ModifierApplyPlan.prepare(stack, selected.id, reports, scope = if (applySelectedOnly) "selected" else "prefix")
+                                    }
+                                    fun planNames(field: String) = applyPlan.getValue(field).jsonArray.joinToString { value ->
+                                        val id = value.jsonPrimitive.content
+                                        stack.instances.firstOrNull { it.id == id }?.let { "${modifierName(it.type)} ($id)" } ?: id
+                                    }.ifEmpty { "—" }
+                                    Text(tr("modifier.apply.scope", planNames("materialized"), planNames("disabled"), planNames("retained")),
+                                        style = LocalToolTypography.current.caption, color = colors.textPrimary)
+                                    Text(tr("modifier.apply.corrections", applyPlan.getValue("baked_overrides").jsonPrimitive.int,
+                                        applyPlan.getValue("dormant_overrides").jsonPrimitive.int),
+                                        style = LocalToolTypography.current.caption, color = colors.textPrimary)
+                                    for (edge in applyPlan.getValue("dependencies").jsonArray) {
+                                        val dependency = edge.jsonObject
+                                        Text("${dependency.getValue("provider").jsonPrimitive.content} → ${dependency.getValue("consumer").jsonPrimitive.content}",
+                                            style = LocalToolTypography.current.caption, color = colors.textPrimary)
+                                    }
+                                    val canApply = applyPlan.getValue("can_apply").jsonPrimitive.boolean
+                                    if (applyPlan.getValue("fixed_conflicts").jsonPrimitive.int > 0) Text(tr("modifier.apply.fixedConflicts"),
+                                        style = LocalToolTypography.current.caption, color = colors.textPrimary)
+                                    if (!canApply) Text(tr("modifier.apply.blocked"),
+                                        style = LocalToolTypography.current.caption, color = colors.textPrimary)
+                                    for (value in applyPlan.getValue("blockers").jsonArray) {
+                                        val blocker = value.jsonObject
+                                        val blockedId = blocker.getValue("id").jsonPrimitive.content
+                                        val reason = blocker.getValue("reason").jsonPrimitive.content
+                                        val label = stack.instances.firstOrNull { it.id == blockedId }?.let {
+                                            "${modifierName(it.type)} ($blockedId)"
+                                        } ?: blockedId
+                                        val explanation = when (reason) {
+                                            "already_applied", "override_orphaned" -> tr("modifier.apply.$reason")
+                                            "missing_report" -> tr("modifier.status.loading")
+                                            else -> tr("modifier.status.$reason")
+                                        }
+                                        CompactButton(tr("modifier.apply.inspect", label, explanation),
+                                            { selectedId = blockedId; page = 0 }, height = 24.dp,
+                                            modifier = Modifier.fillMaxWidth())
+                                    }
                                     CompactButton(
-                                        tr("modifier.apply"),
-                                        { vm.editModifier("modifier_apply", buildJsonObject { put("id", selected.id) }) },
-                                        enabled = enabled,
+                                        tr(if (applySelectedOnly) "modifier.apply.selected" else "modifier.apply"),
+                                        { vm.editModifier("modifier_apply", buildJsonObject {
+                                            put("id", selected.id); put("scope", if (applySelectedOnly) "selected" else "prefix")
+                                        }) },
+                                        enabled = enabled && canApply,
                                         height = 24.dp,
                                         modifier = Modifier.fillMaxWidth(),
                                     )
@@ -740,20 +787,10 @@ private fun ModifierAdditionMenu(state: PSD2LiveState, vm: PSD2LiveViewModel) {
     val dialog = vm.modifierAddition ?: return
     val groups = dialog.group != null
     if (groups) {
-        PressMenu(expanded = true, press = Offset.Zero, onDismissRequest = { if (!dialog.committing) vm.dismissModifierAddition() }, width = 340.dp) {
-            FloatingMenuSection(tr("modifier.switch.description"))
-            val baselines by io.github.psd2live.application.WorkspaceModelPresetLibrary.shared.state.collectAsState()
-            GlidingColumn(Modifier.fillMaxWidth(), baselines.size, highlights = { !dialog.committing }) { index ->
-                val entry = baselines[index]
-                val hint = entry.nameKey?.let { key ->
-                    val hintKey = "$key.hint"
-                    tr(hintKey).takeUnless { it == hintKey }
-                }
-                FloatingMenuRow(entry.nameKey?.let { tr(it) } ?: entry.name, { vm.switchModifierPreset(entry.id) }, enabled = !dialog.committing, hint = hint, bar = false)
-            }
-            if (dialog.committing) FloatingMenuSection(tr("modifier.adding"))
-            dialog.error?.let { FloatingMenuRow(tr("modifier.switch"), {}, enabled = false, hint = it) }
+        val currentStack = remember(state.rigEdits.modifierStack) {
+            state.rigEdits.modifierStack?.let { RigModifierStack.fromJson(it) }
         }
+        ModifierPresetMenu(state, currentStack, dialog, vm)
         return
     }
     val pluginRevision by ModifierPluginStore.shared.revision.collectAsState()

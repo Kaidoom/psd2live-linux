@@ -4,7 +4,7 @@ import io.github.psd2live.core.modifier.ModifierSourceBounds
 import io.github.psd2live.core.modifier.ModifierSourceTransform
 
 /** The ribbon and all of its posed versions share the same path samples and topology. */
-class MouthOutlineStroke(columns: List<MouthColumn>, side: Int, thickness: Float) {
+class MouthOutlineStroke(columns: List<MouthColumn>, val side: Int, thickness: Float) {
     init {
         require(columns.size >= 2 && side in 0..1 && thickness.isFinite()) { "Invalid outline contour" }
     }
@@ -28,7 +28,27 @@ class MouthOutlineStroke(columns: List<MouthColumn>, side: Int, thickness: Float
         transformPoint: (Float, Float) -> Pair<Float, Float>,
     ): FloatArray {
         val posedPath = path.map { (x, y) -> transformPoint(x, y) }
-        val posed = inParent(MouthStrokeMesh.positions(posedPath, radius, joins), frame)
+        return centerlineDelta(frame, restPositions, posedPath)
+    }
+
+    /** Both the main stroke and its opposite-lip tips use the same posed centerline and stroke construction. */
+    fun ribbonDelta(
+        frame: ModifierSourceBounds,
+        restPositions: FloatArray,
+        transformCenter: (upper: Boolean, x: Float, y: Float) -> Pair<Float, Float>,
+    ): FloatArray {
+        val posedCenters = path.mapIndexed { i, (x, y) ->
+            val onMain = i in start..end
+            val upper = if (onMain) side == 0 else side != 0
+            transformCenter(upper, x, y)
+        }
+        return centerlineDelta(frame, restPositions, posedCenters)
+    }
+
+    private fun centerlineDelta(
+        frame: ModifierSourceBounds, restPositions: FloatArray, centers: List<Pair<Float, Float>>,
+    ): FloatArray {
+        val posed = inParent(MouthStrokeMesh.positions(centers, radius, joins), frame)
         require(restPositions.size == posed.size)
         return FloatArray(posed.size) { posed[it] - restPositions[it] }
     }

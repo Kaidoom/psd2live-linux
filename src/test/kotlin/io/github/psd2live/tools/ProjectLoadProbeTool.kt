@@ -4,6 +4,7 @@ import io.github.psd2live.application.WorkspacePreviewBuilder
 import io.github.psd2live.algorithms.binding.ClosedMouthVisibility
 import io.github.psd2live.core.RigIrCompiler
 import io.github.psd2live.core.SemanticTag
+import io.github.psd2live.format.compile.RigIrBinary
 import io.github.psd2live.core.modifier.*
 import io.github.psd2live.project.ProjectRepository
 import io.github.psd2live.scenario.Studio
@@ -68,13 +69,26 @@ class ProjectLoadProbeTool {
                 }
                 val model = WorkspacePreviewBuilder(modifierCachesEnabled = false).build(document)
                 val missing = model.rig.modifierReport?.get("entries")?.jsonArray.orEmpty().filter {
-                    it.jsonObject["status"]?.jsonPrimitive?.content?.startsWith("missing") == true
+                    val status = it.jsonObject["status"]?.jsonPrimitive?.content.orEmpty()
+                    status.startsWith("missing") || status == "failed"
                 }
                 kotlin.test.assertTrue(missing.isEmpty(), "Saved modifiers must actually run: $missing")
                 val issues = model.rig.modifierReport?.get("entries")?.jsonArray.orEmpty()
                     .flatMap { it.jsonObject["override_issues"]?.jsonArray.orEmpty() }
                 println("Generated override issues: $issues")
                 println("Opened ${path.fileName}: ${model.rig.puppet.drawables.size} drawables, ${stack.instances.size} modifiers")
+                System.getenv("PSD2LIVE_WRITE_BASELINE")?.let { target ->
+                    Files.write(Path.of(target), RigIrBinary.encode(RigIrCompiler.compile(model)))
+                }
+                System.getenv("PSD2LIVE_COMPARE_BASELINE")?.let { target ->
+                    val expected = RigIrBinary.decode(Files.readAllBytes(Path.of(target)))
+                    val actual = RigIrCompiler.compile(model)
+                    val changed = expected.javaClass.declaredFields.filterNot { java.lang.reflect.Modifier.isStatic(it.modifiers) }
+                        .filter { field -> field.isAccessible = true; field.get(expected) != field.get(actual) }.map { it.name }
+                    assertTrue(expected == actual, "Saved project output changed across the application update: $changed; " +
+                        "missing meshes=${expected.meshes.map { it.id } - actual.meshes.map { it.id }.toSet()}")
+                    println("Saved project output matches the pre-update baseline")
+                }
                 if (System.getenv("PSD2LIVE_TEST_VISIBILITY") == "1") {
                     Studio.run(temp.resolve("visibility"), document, checks = setOf(Studio.Check.UNDO, Studio.Check.REPLAY)) {
                         val before = puppet

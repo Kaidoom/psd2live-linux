@@ -12,15 +12,17 @@ import java.util.concurrent.FutureTask
 /** A preset is a recipe for explicit instances, never a second model-generation pipeline. */
 internal object WorkspacePresetInitialization {
     fun create(document: WorkspaceDocument, work: WorkspaceRasterWork,
-               choices: WorkspaceInitialPreset = WorkspaceInitialPreset()): WorkspaceDocument =
-        prepare(document, work, choices).first
+               choices: WorkspaceInitialPreset = WorkspaceInitialPreset(),
+               richness: String? = null): WorkspaceDocument =
+        prepare(document, work, choices, richness = richness).first
 
     fun prepare(document: WorkspaceDocument, work: WorkspaceRasterWork,
                 choices: WorkspaceInitialPreset = WorkspaceInitialPreset(),
                 requestedVersions: Map<String, Int> = emptyMap(),
                 cliBindings: CliPresetBindings? = null,
                 restoreSourceRotations: Boolean = false,
-                pluginOverrides: Map<String, Pair<String, ModifierPluginReference>> = emptyMap()): Pair<WorkspaceDocument, RigPreviewModel> {
+                pluginOverrides: Map<String, Pair<String, ModifierPluginReference>> = emptyMap(),
+                richness: String? = null): Pair<WorkspaceDocument, RigPreviewModel> {
         val rawConfig = cliBindings?.config?.takeIf { restoreSourceRotations }
         fun configOf(candidate: WorkspaceDocument) = rawConfig?.copy(rigEdits = candidate.rigEdits) ?: candidate.config()
         val config = configOf(document)
@@ -44,7 +46,14 @@ internal object WorkspacePresetInitialization {
         fun build(stage: String): RigPreviewModel = RigBuildProfile.stage("source preset: $stage") {
             work.checkpoint()
             val candidate = current()
-            pipeline.buildPreview(candidate.source, configOf(candidate), ProgressListener { _, _ -> work.checkpoint() })
+            var lastProgress: Pair<String, Double>? = null
+            pipeline.buildPreview(candidate.source, configOf(candidate), ProgressListener { message, fraction ->
+                work.checkpoint()
+                if (lastProgress != (message to fraction)) {
+                    lastProgress = message to fraction
+                    work.progress(fraction.toFloat(), "$stage: $message")
+                }
+            })
         }
         // Planning needs the package graph, but making the ordinary source meshes only needs the empty stack.
         val catalog = FutureTask { RigModifierAlgorithms.registry }.also {
@@ -68,6 +77,19 @@ internal object WorkspacePresetInitialization {
             if (rawConfig == null) model.runtimeBundle.materialize()
             return document to model
         }
+        // Import and CLI callers preserve their configured recipe unless a template tier is explicitly selected.
+        val tiers = when (richness) {
+            null -> ModuleTier.entries.toSet()
+            "base" -> emptySet()
+            "minimal" -> setOf(ModuleTier.CORE)
+            "standard" -> setOf(ModuleTier.CORE, ModuleTier.MAJOR)
+            "full" -> ModuleTier.entries.toSet()
+            else -> throw IllegalArgumentException("Unknown preset richness: $richness")
+        }
+        val excludedModules = buildSet {
+            addAll(WorkspaceModifierPlan.PRESET_EXCLUDED_MODULES)
+            if (choices.clothing) add("outfit.ribbons")
+        }
         val subject = RecipeSubject.of(model.analysis)
         val fittedFace = RigModules.builds(RigModules.FACE_DEPTH_TURN, config, subject)
         val types = buildList {
@@ -75,12 +97,15 @@ internal object WorkspacePresetInitialization {
             // Finish base frame changes before mouth source topology is consumed by add-ons.
             for (area in listOf("eye", "brow", "face", "body", "hair", "mouth"))
                 add(if (area == "face" && fittedFace) RigLegacyBindings.FITTED_FACE else config.recipe.base(area).id)
-            addAll(RigModules.modules.filter { RigModules.builds(it, config, subject) && it.id !in WorkspaceModifierPlan.PRESET_EXCLUDED_MODULES }
-                .map { it.id }.filter { RigLegacyBindings.find(it) != null })
+            addAll(RigModules.modules.filter {
+                RigModules.builds(it, config, subject) &&
+                    it.id !in excludedModules &&
+                    it.tier in tiers
+            }.map { it.id }.filter { RigLegacyBindings.find(it) != null })
         }
         val group = if (config.recipe.modern) "modern" else "legacy"
         stack = WorkspaceModifierPlan.plan(model, stack, buildJsonObject {
-            put("group", "$group-standard")
+            put("group", "$group-${richness ?: "standard"}")
             put("targets", JsonArray(targets.map { buildJsonObject { put("kind", it.kind); put("id", it.id) } }))
         }, types).first
         stack = stack.copy(instances = stack.instances.map { entry ->
@@ -185,13 +210,14 @@ internal object WorkspacePresetInitialization {
         })
         RigModifierAlgorithms.evaluator().validateOrder(stack)
         stack = RigBuildProfile.stage("source preset: simulation preparation") {
-            WorkspaceModifierSimulation.prepare(current(), stack, work, pipeline = pipeline)
+            WorkspaceModifierSimulation.prepare(current(), stack, work, pipeline = pipeline, isolateFailures = true)
         }
-        return current() to build("final preview").also {
+        val finalModel = build("final preview").also {
             work.checkpoint()
             if (rawConfig == null) it.runtimeBundle.materialize()
             work.checkpoint()
         }
+        return current() to finalModel
     }
 
     internal fun freshSource(config: PipelineConfig): Boolean =

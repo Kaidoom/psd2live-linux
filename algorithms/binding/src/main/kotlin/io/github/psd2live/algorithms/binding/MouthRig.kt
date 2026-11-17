@@ -176,6 +176,14 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 	private fun drawnLower(u: Float) = MouthFit.sample(fit.lower, u) - fit.baseline(u)
 
 	private val target: TargetGeom = buildTargetGeom()
+	private val middleX = FloatArray(stations) { .5f * (target.uxMono0[it] + target.lxMono0[it]) }
+
+	/** Closing joins material columns at one seam station even when the lips have different arc lengths. */
+	private fun posedStation(sourceAt: Float, xRig: Float, yRig: Float, ep: EvaluatedPose): Float {
+		val x = target.toLocalPx(xRig, yRig).first
+		val common = interp1D(x.coerceIn(middleX.first(), middleX.last()), middleX, uDense)
+		return common + (sourceAt - common) * ep.restContourWeight
+	}
 
 	// A whole mouth has no authored closed lip line. Its open contour's midpoint is not a closed-mouth drawing.
 	private val closedMidlineLocal: FloatArray? = if (target.isLayeredArt) null else FloatArray(stations) { i ->
@@ -379,6 +387,7 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 		val nL1: FloatArray,
 		val closing: FloatArray,
 		val restContourWeight: Float,
+		val xScale: Float,
 		val shiftXPx: Float,
 		val openRatio: Float,
 		val openSym: Float,
@@ -428,6 +437,7 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 	}
 
 	private val poseCache = java.util.concurrent.ConcurrentHashMap<Pose, EvaluatedPose>()
+	private val closedLineContours = java.util.concurrent.ConcurrentHashMap<Float, MouthThreeLayerModel.TransferredCurves>()
 
 	private fun eval(pose: Pose): EvaluatedPose = poseCache.computeIfAbsent(pose, ::computePose)
 
@@ -505,6 +515,28 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 		val l1LocPx = FloatArray(stations * 2) { tr.lowerLocal[it] * w }
 		val usLocPx = if (hasAsym) FloatArray(stations * 2) { trSym.upperLocal[it] * w } else u1LocPx
 		val lsLocPx = if (hasAsym) FloatArray(stations * 2) { trSym.lowerLocal[it] * w } else l1LocPx
+		if ((!target.isLayeredArt || target.hasLines) && options.exactClose && openEff < 1f) {
+			// A closed line mouth has one seam, whether its strokes are drawn or generated. Remove the base form's residual aperture,
+			// while retaining the difference added by press, jaw and other opening controls.
+			val closed = closedLineContours.computeIfAbsent(formEff) {
+				model.transferToTargetLocal(model.evaluateNormalized(openY = 0f, form = it),
+					target.u0LocalNorm, target.l0LocalNorm, target.hasLines,
+					closedGap = 0f, customCurveDelta = customCurveDelta, closedMidlineLocal = closedMidlineLocal)
+			}
+			fun close(upper: FloatArray, lower: FloatArray) {
+				for (i in upper.indices) {
+					val correction = (closed.lowerLocal[i] - closed.upperLocal[i]) * .5f * w * (1f - openEff)
+					upper[i] += correction
+					lower[i] -= correction
+					if (i % 2 == 1 && lower[i] < upper[i]) {
+						val mid = (upper[i] + lower[i]) * .5f
+						upper[i] = mid; lower[i] = mid
+					}
+				}
+			}
+			close(u1LocPx, l1LocPx)
+			if (hasAsym) close(usLocPx, lsLocPx)
+		}
 
 		val u1World = FloatArray(stations * 2)
 		val l1World = FloatArray(stations * 2)
@@ -657,6 +689,8 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 			nL1 = nL1,
 			closing = closing,
 			restContourWeight = openEff.coerceIn(0f, 1f),
+			xScale = ((u1LocPx[(stations - 1) * 2] - u1LocPx[0]) /
+				(target.u0LocPx[(stations - 1) * 2] - target.u0LocPx[0]).coerceAtLeast(1e-4f)).coerceIn(0.2f, 1.5f),
 			shiftXPx = tr.shiftXNorm * w,
 			openRatio = openRatio,
 			openSym = openSym,
@@ -787,13 +821,11 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 		Follow.DEEP -> deepMove(pose)
 	}
 
-	private fun strokeRaw(upper: Boolean, xRig: Float, yRig: Float, ep: EvaluatedPose): Triple<Float, Float, Float> {
+	private fun strokeRaw(upper: Boolean, xRig: Float, yRig: Float, ep: EvaluatedPose): Pair<Float, Float> {
 		val c0 = if (upper) target.u0World else target.l0World
 		val c1 = if (upper) ep.u1World else ep.l1World
 		val t0 = if (upper) target.tU0 else target.tL0
-		val n0 = if (upper) target.nU0 else target.nL0
 		val t1 = if (upper) ep.tU1 else ep.tL1
-		val n1 = if (upper) ep.nU1 else ep.nL1
 
 		var bestSeg = 0
 		var bestT = 0f
@@ -815,10 +847,14 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 		}
 
 		val i0 = bestSeg; val i1 = bestSeg + 1; val s = bestT; val oms = 1f - s
+		val uAt = (i0 + s) / (stations - 1).toFloat()
 		val c0x = c0[i0 * 2] * oms + c0[i1 * 2] * s
 		val c0y = c0[i0 * 2 + 1] * oms + c0[i1 * 2 + 1] * s
-		val c1x = c1[i0 * 2] * oms + c1[i1 * 2] * s
-		val c1y = c1[i0 * 2 + 1] * oms + c1[i1 * 2 + 1] * s
+		val at = posedStation(uAt, c0x, c0y, ep) * (stations - 1)
+		val j0 = at.toInt().coerceIn(0, stations - 2); val j1 = j0 + 1
+		val r = at - j0; val omr = 1f - r
+		val c1x = c1[j0 * 2] * omr + c1[j1 * 2] * r
+		val c1y = c1[j0 * 2 + 1] * omr + c1[j1 * 2 + 1] * r
 
 		var t0x = t0[i0 * 2] * oms + t0[i1 * 2] * s
 		var t0y = t0[i0 * 2 + 1] * oms + t0[i1 * 2 + 1] * s
@@ -826,13 +862,13 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 		t0x /= l0Len; t0y /= l0Len
 		val n0x = -t0y; val n0y = t0x
 
-		var t1x = t1[i0 * 2] * oms + t1[i1 * 2] * s
-		var t1y = t1[i0 * 2 + 1] * oms + t1[i1 * 2 + 1] * s
+		var t1x = t1[j0 * 2] * omr + t1[j1 * 2] * r
+		var t1y = t1[j0 * 2 + 1] * omr + t1[j1 * 2 + 1] * r
 		val l1Len = hypot(t1x, t1y).coerceAtLeast(1e-8f)
 		t1x /= l1Len; t1y /= l1Len
 		val n1x = -t1y; val n1y = t1x
 
-		val closeVal = ep.closing[i0] * oms + ep.closing[i1] * s
+		val closeVal = 1f - ep.restContourWeight
 		val relX = xRig - c0x; val relY = yRig - c0y
 		val tau = relX * t0x + relY * t0y
 		val nu = relX * n0x + relY * n0y
@@ -847,19 +883,16 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 
 		val posedX = c1x + tau * t1x + nuEff * n1x
 		val posedY = c1y + tau * t1y + nuEff * n1y
-		val uAt = (i0 + s) / (stations - 1).toFloat()
-		return Triple(posedX - xRig, posedY - yRig, uAt)
+		return (posedX - xRig) to (posedY - yRig)
 	}
 
 	private fun strokeMove(upper: Boolean, u: Float, v: Float, pose: Pose): Pair<Float, Float> {
 		val ep = eval(pose)
 		val (xRig, yRig) = fit.toCanvas(u, v)
-		val (ownDx, ownDy, uAt) = strokeRaw(upper, xRig, yRig, ep)
-		val s = (1f - min(uAt, 1f - uAt) / CORNER_ZONE).coerceIn(0f, 1f)
-		if (s <= 0f) return rigDeltaToMouth(ownDx, ownDy)
-		val (otherDx, otherDy, _) = strokeRaw(!upper, xRig, yRig, ep)
-		val w = 0.5f * s * s * (3f - 2f * s)
-		return rigDeltaToMouth(ownDx + (otherDx - ownDx) * w, ownDy + (otherDy - ownDy) * w)
+		val (dx, dy) = strokeRaw(upper, xRig, yRig, ep)
+		// Anchor the material at its own lip station. A corner frame anchored at the
+		// endpoint would retain the source arc's height as if it were stroke thickness.
+		return rigDeltaToMouth(dx, dy)
 	}
 
 	private fun openingMove(u: Float, v: Float, pose: Pose): Pair<Float, Float> {
@@ -885,28 +918,37 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 		val (xLoc, yLoc) = target.toLocalPx(xRig, yRig)
 		val ox = target.openColsXLoc
 		val xFirst = ox.first(); val xLast = ox.last()
-		val uMap = ((xLoc - xFirst) / (xLast - xFirst).coerceAtLeast(1e-4f)).coerceIn(0f, 1f)
-		val extraX = when {
-			xLoc < xFirst -> xLoc - xFirst
-			xLoc > xLast -> xLoc - xLast
-			else -> 0f
-		}
-		val top0 = interp1D(xLoc, ox, target.openTopYLoc)
-		val bot0 = interp1D(xLoc, ox, target.openBotYLoc)
-		val span0 = max(bot0 - top0, max(1.2f, 0.015f * target.widthPx))
+		val xClamped = xLoc.coerceIn(xFirst, xLast)
+		val extraX = xLoc - xClamped
+		val top0 = interp1D(xClamped, ox, target.openTopYLoc)
+		val bot0 = interp1D(xClamped, ox, target.openBotYLoc)
+		// A narrow corner still spans the complete opening. A pixel-sized floor
+		// would pull its bottom boundary away from the corresponding lower lip.
+		val span0 = max(bot0 - top0, 1e-7f * target.widthPx)
 		val frac = (yLoc - top0) / span0
 		val fracCl = frac.coerceIn(0f, 1f)
 
-		val f = uMap * (stations - 1)
-		val idx = f.toInt().coerceAtMost(stations - 2)
-		val s = f - idx; val oms = 1f - s
-		val ux = ep.u1LocPx[idx * 2] * oms + ep.u1LocPx[(idx + 1) * 2] * s
-		val uy = ep.u1LocPx[idx * 2 + 1] * oms + ep.u1LocPx[(idx + 1) * 2 + 1] * s
-		val lx = ep.l1LocPx[idx * 2] * oms + ep.l1LocPx[(idx + 1) * 2] * s
-		val ly = ep.l1LocPx[idx * 2 + 1] * oms + ep.l1LocPx[(idx + 1) * 2 + 1] * s
+		// Lip stations are sampled by arc length, not by horizontal position. Each
+		// rim therefore has its own station at this column of the opening artwork.
+		val (xRefRig, yRefRig) = if (xClamped == xLoc) xRig to yRig else target.localPxToRig(xClamped, yLoc)
+		fun edge(xs: FloatArray, posed: FloatArray): Pair<Float, Float> {
+			val sourceAt = interp1D(xClamped.coerceIn(xs.first(), xs.last()), xs, uDense)
+			val at = posedStation(sourceAt, xRefRig, yRefRig, ep) * (stations - 1)
+			val i = at.toInt().coerceIn(0, stations - 2)
+			val t = at - i
+			return (posed[i * 2] * (1f - t) + posed[(i + 1) * 2] * t) to
+				(posed[i * 2 + 1] * (1f - t) + posed[(i + 1) * 2 + 1] * t)
+		}
+		val (ux, uy) = edge(target.uxMono0, ep.u1LocPx)
+		val (lx, ly) = edge(target.lxMono0, ep.l1LocPx)
 
-		val newXLoc = (1f - fracCl) * ux + fracCl * lx + extraX
-		val newYLoc = (1f - frac) * uy + frac * ly
+		val newXLoc = (1f - fracCl) * ux + fracCl * lx + extraX * ep.xScale * ep.restContourWeight
+		val outScale = ((ly - uy) / span0).coerceIn(0f, 1.5f)
+		val newYLoc = when {
+			yLoc < top0 -> uy + (yLoc - top0) * outScale
+			yLoc > bot0 -> ly + (yLoc - bot0) * outScale
+			else -> (1f - fracCl) * uy + fracCl * ly
+		}
 		val (dxRig, dyRig) = target.localDeltaToRig(newXLoc - xLoc, newYLoc - yLoc)
 		return rigDeltaToMouth(dxRig, dyRig)
 	}
@@ -941,9 +983,81 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
         val upper = target.upperLipBoundsLocal
         val lower = target.lowerLipBoundsLocal
         if (!target.isLayeredArt || upper == null || lower == null) null
-        else MouthSkinField(target.u0LocPx, target.l0LocPx, upper.union(lower))
+        else {
+            var minX = Float.POSITIVE_INFINITY; var maxX = Float.NEGATIVE_INFINITY
+            var minY = Float.POSITIVE_INFINITY; var maxY = Float.NEGATIVE_INFINITY
+            for (i in 0 until stations) {
+                minX = min(minX, min(target.u0LocPx[i * 2], target.l0LocPx[i * 2]))
+                maxX = max(maxX, max(target.u0LocPx[i * 2], target.l0LocPx[i * 2]))
+                minY = min(minY, min(target.u0LocPx[i * 2 + 1], target.l0LocPx[i * 2 + 1]))
+                maxY = max(maxY, max(target.u0LocPx[i * 2 + 1], target.l0LocPx[i * 2 + 1]))
+            }
+            val w = target.widthPx
+            val perioral = Bounds(minX - 0.25f * w, minY - 0.22f * w, maxX + 0.25f * w, maxY + 0.28f * w)
+            MouthSkinField(target.u0LocPx, target.l0LocPx, upper.union(lower).union(perioral))
+        }
     }
     private val skinPoses = java.util.concurrent.ConcurrentHashMap<Pair<Pose, Float>, MouthSkinField.Posed>()
+    private val closedSkinField by lazy {
+        val upper = target.upperLipBoundsLocal
+        val lower = target.lowerLipBoundsLocal
+        if (!target.isLayeredArt || upper == null || lower == null) null
+        else {
+            val seamU = shutEval.u1LocPx
+            val seamL = shutEval.l1LocPx
+            var minX = Float.POSITIVE_INFINITY; var maxX = Float.NEGATIVE_INFINITY
+            var minY = Float.POSITIVE_INFINITY; var maxY = Float.NEGATIVE_INFINITY
+            for (i in 0 until stations) {
+                minX = min(minX, min(seamU[i * 2], seamL[i * 2]))
+                maxX = max(maxX, max(seamU[i * 2], seamL[i * 2]))
+                minY = min(minY, min(seamU[i * 2 + 1], seamL[i * 2 + 1]))
+                maxY = max(maxY, max(seamU[i * 2 + 1], seamL[i * 2 + 1]))
+            }
+            val w = target.widthPx
+            val perioral = Bounds(minX - 0.25f * w, minY - 0.22f * w, maxX + 0.25f * w, maxY + 0.28f * w)
+            MouthSkinField(seamU, seamL, upper.union(lower).union(perioral))
+        }
+    }
+    private val closedSkinPoses = java.util.concurrent.ConcurrentHashMap<Pair<Pose, Float>, MouthSkinField.Posed>()
+
+    private fun isClosedDrawnLip(upper: Boolean, positions: FloatArray): Boolean {
+        if (!target.isLayeredArt || closedSkinField == null) return false
+        val w = target.widthPx.coerceAtLeast(1e-4f)
+        val u0MidY = target.u0LocPx[midIdx * 2 + 1]
+        val l0MidY = target.l0LocPx[midIdx * 2 + 1]
+        val span = (l0MidY - u0MidY).coerceAtLeast(1e-4f)
+        val margin = max(0.35f * span, 0.03f * w)
+        for (i in positions.indices step 2) {
+            val (xLoc, yLoc) = target.toLocalPx(positions[i], positions[i + 1])
+            if (abs(xLoc) > 0.20f * w) continue
+            if (upper) {
+                if (yLoc >= u0MidY + margin && yLoc <= l0MidY + 0.10f * span) return true
+            } else {
+                if (yLoc <= l0MidY - margin && yLoc >= u0MidY - 0.10f * span) return true
+            }
+        }
+        return false
+    }
+
+    private fun lipSkinMoveClosed(upper: Boolean, u: Float, v: Float, pose: Pose, chin: Float): Pair<Float, Float> {
+        val field = closedSkinField ?: return 0f to 0f
+        if (pose == Pose(open = 0f)) return 0f to 0f
+        val ep = eval(pose)
+        val shut = shutEval
+        val (xRig, yRig) = fit.toCanvas(u, v)
+        val (xLoc, yLoc) = target.toLocalPx(xRig, yRig)
+        fun outsideDelta(x: Float, y: Float): Pair<Float, Float> {
+            val a = faceBaseMoveLocal(x, y, ep, chin)
+            val b = faceBaseMoveLocal(x, y, shut, chin)
+            return (a.first - b.first) to (a.second - b.second)
+        }
+        val posed = closedSkinPoses.computeIfAbsent(ep.pose to chin) {
+            field.pose(ep.u1LocPx, ep.l1LocPx, ::outsideDelta)
+        }
+        val (dxLoc, dyLoc) = posed.displacement(xLoc, yLoc, upper) ?: outsideDelta(xLoc, yLoc)
+        val (dxRig, dyRig) = target.localDeltaToRig(dxLoc, dyLoc)
+        return rigDeltaToMouth(dxRig, dyRig)
+    }
 
     private fun lippedFaceMoveLocal(xLoc: Float, yLoc: Float, ep: EvaluatedPose, chin: Float): Pair<Float, Float> {
         val field = skinField ?: return faceBaseMoveLocal(xLoc, yLoc, ep, chin).let { base ->
@@ -1239,9 +1353,13 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 		return depth
 	}
 
-	private fun form(positions: FloatArray, frame: Bounds, pose: Pose, follow: Follow = Follow.WHOLE, chin: Float = 0.6f): MeshDeltaForm {
+	private fun form(positions: FloatArray, frame: Bounds, pose: Pose, follow: Follow = Follow.WHOLE, chin: Float = 0.6f, closedLip: Boolean = false): MeshDeltaForm {
 		val depth = if (follow == Follow.UPPER_TEETH) teethDepth(positions) else 0f
-		return form(positions, frame) { u, v -> moveAsInternal(follow, u, v, pose, chin, depth) }
+		return form(positions, frame) { u, v ->
+			if (closedLip && (follow == Follow.UPPER_LIP || follow == Follow.LOWER_LIP)) {
+				lipSkinMoveClosed(follow == Follow.UPPER_LIP, u, v, pose, chin)
+			} else moveAsInternal(follow, u, v, pose, chin, depth)
+		}
 	}
 
 	private fun form(positions: FloatArray, frame: Bounds, change: (Float, Float) -> Pair<Float, Float>): MeshDeltaForm {
@@ -1275,6 +1393,9 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 
 	/** [positions] (x, y pairs) where the mouth at rest - shut - holds them, a layer moving as [follow]. */
 	fun atRest(positions: FloatArray, follow: Follow, chin: Float = 0.6f): FloatArray {
+		if ((follow == Follow.UPPER_LIP || follow == Follow.LOWER_LIP) && isClosedDrawnLip(follow == Follow.UPPER_LIP, positions)) {
+			return positions.copyOf()
+		}
 		val rest = pressed(pose(0f, 0f), 0f, 0f)
 		val depth = if (follow == Follow.UPPER_TEETH) teethDepth(positions) else 0f
 		return FloatArray(positions.size).also { out ->
@@ -1302,8 +1423,10 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 	}
 
 	/** A mouth layer's grid: its form by its openness. Deltas are over the parent [frame]; the layer moves as [follow]. */
-	fun grid(positions: FloatArray, frame: Bounds, mouthForm: ParameterId, mouthOpen: ParameterId, follow: Follow = Follow.WHOLE, chin: Float = 0.6f): KeyformGrid<MeshDeltaForm> =
-		keyed(mouthForm, mouthOpen) { pose -> form(positions, frame, pose, follow, chin) }
+	fun grid(positions: FloatArray, frame: Bounds, mouthForm: ParameterId, mouthOpen: ParameterId, follow: Follow = Follow.WHOLE, chin: Float = 0.6f): KeyformGrid<MeshDeltaForm> {
+		val closedLip = (follow == Follow.UPPER_LIP || follow == Follow.LOWER_LIP) && isClosedDrawnLip(follow == Follow.UPPER_LIP, positions)
+		return keyed(mouthForm, mouthOpen) { pose -> form(positions, frame, pose, follow, chin, closedLip) }
+	}
 
 	/** A lip-skin mouth's shared perioral + jaw grid on `FACE`, matching `UPPER_LIP`/`LOWER_LIP` outer borders with zero seam. */
 	fun faceGrid(positions: FloatArray, frame: Bounds, mouthForm: ParameterId, mouthOpen: ParameterId, chin: Float): KeyformGrid<MeshDeltaForm> =
@@ -1330,6 +1453,39 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 		val (du, dv) = move(u, v, pose, tight = true)
 		val (dx, dy) = fit.canvasDelta(du, dv)
 		return (x + dx) to (y + dy)
+	}
+
+	/** Maps authored lip material through its fitted curve and local stroke frame. */
+	fun strokePoint(upper: Boolean, x: Float, y: Float, pose: Pose): Pair<Float, Float> {
+		val (u, v) = fit.toMouth(x, y)
+		val (du, dv) = strokeMove(upper, u, v, pose)
+		val (dx, dy) = fit.canvasDelta(du, dv)
+		return (x + dx) to (y + dy)
+	}
+
+	/**
+	 * Generated strokes bind to the opening's curves, not to the material frame of an authored lip.
+	 * Source contour residuals vanish on closure, including at the shared seam's end stations.
+	 * Ribbon thickness is applied afterwards by MouthOutlineStroke and never contributes to the opening.
+	 */
+	fun strokeCenterPoint(upper: Boolean, x: Float, y: Float, pose: Pose): Pair<Float, Float> {
+		val ep = eval(pose)
+		val source = if (upper) target.u0World else target.l0World
+		val moved = if (upper) ep.u1World else ep.l1World
+		val columns = if (upper) target.uxMono0 else target.lxMono0
+		val localX = target.toLocalPx(x, y).first
+		val sourceAt = interp1D(localX.coerceIn(columns.first(), columns.last()), columns, uDense)
+		fun sample(curve: FloatArray, at: Float): Pair<Float, Float> {
+			val f = at.coerceIn(0f, 1f) * (stations - 1)
+			val i = f.toInt().coerceAtMost(stations - 2)
+			val t = f - i
+			return (curve[i * 2] * (1f - t) + curve[(i + 1) * 2] * t) to
+				(curve[i * 2 + 1] * (1f - t) + curve[(i + 1) * 2 + 1] * t)
+		}
+		val rest = sample(source, sourceAt)
+		val posed = sample(moved, posedStation(sourceAt, x, y, ep))
+		return (posed.first + (x - rest.first) * ep.restContourWeight) to
+			(posed.second + (y - rest.second) * ep.restContourWeight)
 	}
 
 	/**
@@ -1375,9 +1531,10 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 	): List<BlendShapeBinding<MeshForm>> {
 		val innerCaptureAtOpen = !closedLayer && (follow == Follow.UPPER_TEETH || follow == Follow.LOWER_TEETH ||
 			follow == Follow.TONGUE || follow == Follow.PROTRUDING_TONGUE)
+		val closedLip = (follow == Follow.UPPER_LIP || follow == Follow.LOWER_LIP) && isClosedDrawnLip(follow == Follow.UPPER_LIP, positions)
 		val baseFn: (Pose) -> FloatArray = { pose ->
 			(if (closedLayer) form(positions, frame) { u, v -> closedMove(u, v, pose) }
-			else form(positions, frame, pose, follow, chin)).positionDeltas
+			else form(positions, frame, pose, follow, chin, closedLip)).positionDeltas
 		}
 		return buildShapeBindings(baseFn, innerCaptureAtOpen, pressKeyed = !closedLayer, visible = visible, mouthOpen = mouthOpen) +
 			tongueShapes(positions, frame, closedLayer, follow, visible, mouthOpen, chin) +
@@ -1427,8 +1584,9 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 	): List<BlendShapeBinding<MeshForm>> {
 		if (!options.capture || !options.tongue) return emptyList()
 		val openPose = Pose(open = 0.56f, width = -0.05f, tongueOut = 1f)
+		val closedLip = (follow == Follow.UPPER_LIP || follow == Follow.LOWER_LIP) && isClosedDrawnLip(follow == Follow.UPPER_LIP, positions)
 		val deltas = if (closedLayer) form(positions, frame) { u, v -> closedMove(u, v, openPose) }.positionDeltas
-			else form(positions, frame, openPose, follow, chin).positionDeltas
+			else form(positions, frame, openPose, follow, chin, closedLip).positionDeltas
 		val isTongueMesh = follow == Follow.TONGUE || follow == Follow.PROTRUDING_TONGUE
 		val limits = if (isTongueMesh || closedLayer) emptyList() else listOf(
 			BlendWeightLimit(mouthOpen, listOf(
@@ -1619,8 +1777,6 @@ class MouthRig(val fit: MouthFit, val options: MouthOptions, lineWidth: Float? =
 		val OPEN_KEYS = floatArrayOf(0f, SWAP, 0.25f, 0.5f, 1f)
 		val PRESS_KEYS = floatArrayOf(-1f, 0f, 1f)
 		val FORM_KEYS = floatArrayOf(-1f, -0.5f, 0f, 0.5f, 1f)
-		/** How far from a corner, of the width, the two lip lines' ends blend together. */
-		private const val CORNER_ZONE = 0.10f
 		/** How much of a smile's opening the upper teeth fill at most, from its top. */
 		private const val SMILE_TEETH_SHOW = 0.5f
 		private const val TONGUE_SHARE = 0.35f

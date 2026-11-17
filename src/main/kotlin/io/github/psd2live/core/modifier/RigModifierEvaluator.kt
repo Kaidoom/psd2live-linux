@@ -9,6 +9,8 @@ import io.github.psd2live.core.RigBuildProfile
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.boolean
 
 /** An adapter for a version of an existing algorithm; it receives the actual preceding result. */
 internal data class RigModifierDefinition(
@@ -112,7 +114,10 @@ internal class RigModifierRegistry(definitions: List<RigModifierDefinition>) {
     fun storedType(type: String): String = (defaults[type]?.plugin as? ModifierVersionSelection)?.canonicalOptInType ?: type
 }
 
-internal enum class ModifierStatus { ACTIVE, DISABLED, MISSING_DEPENDENCY, MISSING_PLUGIN }
+internal enum class ModifierStatus { ACTIVE, DISABLED, FAILED, MISSING_DEPENDENCY, MISSING_PLUGIN }
+/** Identifies the failed instance for callers that explicitly request strict evaluation. */
+internal class ModifierEvaluationFailure(val instanceId: String, cause: Exception) :
+    IllegalArgumentException(cause.message, cause)
 internal enum class ModifierChange { ADDED, MODIFIED, REMOVED, REUSED }
 internal data class ModifierMaskRelation(val target: String, val before: List<String>, val after: List<String>,
     val beforeInverted: Boolean, val afterInverted: Boolean)
@@ -130,11 +135,14 @@ internal data class ModifierEvaluation(
     val contributions: List<ModifierContribution> = emptyList(),
     val ownedKeyforms: List<ModifierKeyform> = emptyList(),
     val overrideIssues: List<GeneratedOverrideIssue> = emptyList(),
+    val error: String? = null,
+    val errorDetails: String? = null,
+    val algorithmWrites: List<ModifierWrite>? = null,
 )
 internal data class RigModifierResult(val rig: RigIR, val entries: List<ModifierEvaluation>)
 internal data class AppliedModifierPrefix(val authored: RigIR, val stack: RigModifierStack, val result: RigModifierResult)
 
-/** One successful evaluation per pipeline. Failed/cancelled candidates never replace the snapshot. */
+/** One completed evaluation per pipeline. Cancelled or strictly rejected candidates never replace it. */
 internal class RigModifierEvaluationCache {
     data class Snapshot(val context: Any, val authored: RigIR, val stack: RigModifierStack,
                         val entries: List<ModifierEvaluation>, val outputs: List<RigIR>, val plugins: Long = ModifierPluginStore.shared.revision.value,
@@ -142,7 +150,8 @@ internal class RigModifierEvaluationCache {
                         val authorContexts: Map<String, ModifierAlgorithmContext> = emptyMap(),
                         val readAlgorithms: Map<String, ModifierInputCache.ReadEntry> = emptyMap(),
                         /** Immutable caller provenance; never part of the evaluator's semantic cache key. */
-                        val buildInputs: Any? = null)
+                        val buildInputs: Any? = null,
+                        val capabilities: Map<String, ModifierCapability> = emptyMap())
     @Volatile var snapshot: Snapshot? = null
 }
 
@@ -156,9 +165,8 @@ internal class RigModifierEvaluator(
     private val physicsOrder: List<String> = emptyList(),
     private val resolveRasters: ModifierRasterResolver = RigModifierRasterAssets::resolve,
     private val rawSourceRotations: Boolean = false,
-    /** Host-authored settings must not change the input contract of an archived algorithm. */
+    /** Host settings must not change the input contract of archived algorithms. */
     private val algorithmInstance: (RigModifierInstance) -> RigModifierInstance = { it },
-    /** Apply host-owned channel customization before ordinary overrides and ownership accounting. */
     private val customizeGenerated: (RigIR, RigIR, RigModifierInstance) -> RigIR = { _, generated, _ -> generated },
     private val applyOverrides: (RigIR, RigModifierInstance, List<JsonObject>) -> ModifierOverrideResult = { rig, _, edits ->
         require(edits.isEmpty()) { "This evaluator has no override replayer" }; ModifierOverrideResult(rig)
@@ -167,17 +175,19 @@ internal class RigModifierEvaluator(
     fun evaluate(authored: RigIR, stack: RigModifierStack,
                  cache: RigModifierEvaluationCache? = null, context: Any = Unit,
                  reuseCapturedAuthorInputs: Boolean = false,
+                 isolateFailures: Boolean = false,
                  checkpoint: () -> Unit = {}): RigModifierResult = ModifierReadAhead().use {
-        evaluate(authored, stack, cache, context, reuseCapturedAuthorInputs, it, checkpoint)
+        evaluate(authored, stack, cache, context to isolateFailures, reuseCapturedAuthorInputs, isolateFailures, it, checkpoint)
     }
 
     // Reuse captures only when the caller's context keys all author inputs outside the evaluated prefix.
     private fun evaluate(authored: RigIR, stack: RigModifierStack, cache: RigModifierEvaluationCache?, context: Any,
                          reuseCapturedAuthorInputs: Boolean,
+                         isolateFailures: Boolean,
                          ahead: ModifierReadAhead, checkpoint: () -> Unit): RigModifierResult {
         val pluginRevision = ModifierPluginStore.shared.revision.value
         val definitions = resolveDefinitions(stack)
-        validateOrder(stack, definitions)
+        if (!isolateFailures) validateOrder(stack, definitions)
         var current = authored
         val available = stack.appliedCapabilities.toMutableList()
         val entries = ArrayList<ModifierEvaluation>()
@@ -189,11 +199,22 @@ internal class RigModifierEvaluator(
         val authorContexts = HashMap<String, ModifierAlgorithmContext>()
         fun capture(instance: RigModifierInstance): ModifierAlgorithmContext = authorContexts.getOrPut(instance.id) {
             checkpoint()
-            registry.definition(instance).authorContext(instance)
+            requireNotNull(definitions[stack.index(instance.id)]).authorContext(instance)
+        }
+        fun sameAuthorContext(instance: RigModifierInstance): Boolean = try {
+            saved?.authorContexts?.get(instance.id)?.let { it == capture(instance) } ?: true
+        } catch (failure: Exception) {
+            if (!isolateFailures || failure is java.util.concurrent.CancellationException ||
+                failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+            // Re-evaluate inside the instance boundary so a broken capture is reported locally.
+            false
         }
         val reuse = saved?.stack?.instances?.zip(stack.instances)?.takeWhile { (a, b) ->
             a == b && saved.stack.overrides[a.id].orEmpty() == stack.overrides[b.id].orEmpty() &&
-                (reuseCapturedAuthorInputs || (saved.authorContexts[a.id]?.let { it == capture(b) } ?: true))
+                saved.stack.appliedNodes[a.id] == stack.appliedNodes[b.id] &&
+                saved.stack.retryRevisions[a.id] == stack.retryRevisions[b.id] &&
+                saved.stack.initializationFailures[a.id] == stack.initializationFailures[b.id] &&
+                (reuseCapturedAuthorInputs || sameAuthorContext(b))
         }?.size ?: 0
         val outputs = ArrayList<RigIR>()
         val instanceIds = stack.instances.mapTo(HashSet()) { it.id }
@@ -206,7 +227,7 @@ internal class RigModifierEvaluator(
             val definition = definitions[index]
             if (definition == null) {
                 entries += ModifierEvaluation(instance, if (instance.enabled) ModifierStatus.MISSING_PLUGIN else ModifierStatus.DISABLED)
-                if (instance.enabled) unavailableUpstream = instance.id
+                if (instance.enabled && !isolateFailures) unavailableUpstream = instance.id
                 outputs += current
                 continue
             }
@@ -228,174 +249,208 @@ internal class RigModifierEvaluator(
                 outputs += current
                 if (entry.status == ModifierStatus.ACTIVE) {
                     definition.exclusiveFamily?.let { family -> instance.targets.forEach { exclusive[family to it] = instance.id to instance.type } }
-                    entry.contributions.filter { it.change != ModifierChange.REUSED }.forEach {
+                    (entry.algorithmWrites ?: entry.contributions.filter { it.change != ModifierChange.REUSED }
+                        .map { ModifierWrite(it.kind, it.id) }).forEach {
                         writers[it.kind to it.id] = instance.id to definition
                     }
-                    available += instance.capability(definition.appliedConfig(instance), definition.provides)
+                    available += saved.capabilities.getValue(instance.id)
                 }
                 continue
             }
             if (!instance.enabled) {
-                entries += ModifierEvaluation(instance, ModifierStatus.DISABLED)
+                val failure = stack.initializationFailures[instance.id]
+                entries += ModifierEvaluation(instance, if (failure == null) ModifierStatus.DISABLED else ModifierStatus.FAILED,
+                    error = failure)
                 outputs += current
                 continue
             }
-            val missing = definition.requires.filterTo(linkedSetOf()) { type ->
-                val provider = definition.providers(instance)[type]
-                instance.targets.any { target -> available.none { registry.provides(it, type) && target in it.targets && (provider == null || it.id == provider) } }
-            }
-            for ((parameter, provider) in instance.parameterProviders) {
-                if (available.none { it.id == provider } || current.parameters.none { it.id == parameter }) {
-                    missing += "parameter:$parameter@$provider"
+            val beforeEntry = current
+            val beforeExclusive = exclusive.toMap()
+            val beforeWriters = writers.toMap()
+            try {
+                val selectedProviders = definition.providers(instance)
+                val missing = definition.requires.filterTo(linkedSetOf()) { type ->
+                    val provider = selectedProviders[type]
+                    instance.targets.any { target -> available.none { registry.provides(it, type) && target in it.targets && (provider == null || it.id == provider) } }
                 }
-            }
-            definition.motionInputs(instance).filter { id -> current.clips.none { it.id == id } }
-                .forEach { missing += "motion:$it" }
-            if (missing.isNotEmpty()) {
-                entries += ModifierEvaluation(instance, ModifierStatus.MISSING_DEPENDENCY, missing)
+                for ((type, provider) in selectedProviders) {
+                    if (type !in definition.requires && available.none { it.id == provider && registry.provides(it, type) })
+                        missing += "$type@$provider"
+                }
+                for ((parameter, provider) in instance.parameterProviders) {
+                    if (available.none { it.id == provider } || current.parameters.none { it.id == parameter }) {
+                        missing += "parameter:$parameter@$provider"
+                    }
+                }
+                definition.motionInputs(instance).filter { id -> current.clips.none { it.id == id } }
+                    .forEach { missing += "motion:$it" }
+                if (missing.isNotEmpty()) {
+                    entries += ModifierEvaluation(instance, ModifierStatus.MISSING_DEPENDENCY, missing)
+                    outputs += current
+                    continue
+                }
+                definition.exclusiveFamily?.let { family -> instance.targets.forEach { target ->
+                    val previous = exclusive.put(family to target, instance.id to instance.type)
+                    require(previous == null) {
+                        "Modifiers ${previous?.first} (${previous?.second}) and ${instance.id} (${instance.type}) are mutually exclusive on ${target.id} (family $family)"
+                    }
+                } }
+                validateTargets(current, instance)
+                RigBuildProfile.modifierStage("validation", instance.type) { definition.validate(current, instance) }
+                val declared = RigBuildProfile.modifierStage("parameters", instance.type) { definition.parameters(instance) }
+                require(declared.map { it.id }.distinct().size == declared.size) { "${instance.id} declares duplicate parameters" }
+                val existing = current.parameters.associateBy { it.id }
+                val resolved = declared.associate { parameter ->
+                    val before = existing[parameter.id]
+                    val desired = if (before == null || compatible(before, parameter)) parameter
+                        else definition.resolveParameter(instance, before, parameter)
+                    require(desired != null && desired.id == parameter.id) { "${instance.id}: incompatible parameter ${parameter.id}" }
+                    parameter.id to desired
+                }
+                io.github.psd2live.core.RigBuildProfile.count("modifier cache misses")
+                val before = current
+                val capturedContext = RigBuildProfile.modifierStage("input", instance.type) { capture(instance) }
+                val authorContext = if (definition.upstreamInputs || definition.plugin is ReadingModifierAlgorithmPlugin) {
+                    val providers = definition.providers(instance)
+                    val capabilities = (definition.requires + definition.optionalUpstream).sorted().flatMap { required ->
+                        available.filter { registry.provides(it, required) &&
+                            it.targets.any { target -> target in instance.targets } &&
+                            (providers[required] == null || it.id == providers[required]) }.map {
+                            ModifierUpstreamCapability(required, it.type, it.version, it.targets, it.id, it.config, it.outputAliases, it.plugin)
+                        }
+                    }
+                    capturedContext.withUpstream(capabilities)
+                } else capturedContext
+                val inputKey = if (definition.plugin is ReadingModifierAlgorithmPlugin) null else
+                    definition.cacheReads?.let { ModifierInputCache.input(before, it) to authorContext }
+                val cached = algorithmCache[instance.id]?.takeIf { it.instance == instance && it.input == inputKey }
+                val invocation = algorithmInstance(instance)
+                val evaluated = if (cached != null) {
+                    io.github.psd2live.core.RigBuildProfile.count("modifier dependency cache hits")
+                    cached.patch.apply(before)
+                } else RigBuildProfile.modifierStage("evaluate", instance.type) {
+                    val plugin = definition.plugin
+                    when (plugin) {
+                        is ReadingModifierAlgorithmPlugin -> {
+                            val speculative = ahead.take(index)
+                            val cachedRead = (speculative ?: readCache[instance.id])?.takeIf {
+                                it.instance == instance && it.plugin === plugin && it.context == authorContext && it.reads.matches(before, authorContext)
+                            }
+                            val reused = cachedRead?.let {
+                                it.changes.requireWrites(requireNotNull(definition.changeWrites) { "${instance.type}: missing change write contract" })
+                                // Writes have their own preconditions even when a plugin did not read that object.
+                                try { it.changes.applyWithResources(before, checkpoint, resolveRasters) } catch (_: IllegalArgumentException) { null }
+                            }
+                            if (reused != null) {
+                                if (speculative != null && cachedRead === speculative) {
+                                    RigBuildProfile.count("modifier parallel evaluations")
+                                    readCache[instance.id] = speculative
+                                } else RigBuildProfile.count("modifier read cache hits")
+                                reused
+                            } else {
+                                val next = stack.instances.getOrNull(index + 1)
+                                val nextDefinition = definitions.getOrNull(index + 1)
+                                val nextPlugin = nextDefinition?.plugin as? ReadingModifierAlgorithmPlugin
+                                if (next != null && next.enabled && nextDefinition != null && nextPlugin != null &&
+                                    nextDefinition.requires.isEmpty() && nextDefinition.optionalUpstream.isEmpty() &&
+                                    nextDefinition.exclusiveFamily == null && next.id !in readCache &&
+                                    physicsOrder.isEmpty() && stack.overrides[instance.id].isNullOrEmpty() &&
+                                    ahead.canOverlap(definition, nextDefinition) &&
+                                    next.parameterProviders.all { (parameter, provider) ->
+                                        available.any { it.id == provider } && parameter in existing
+                                    }) {
+                                    // Source capture stays on the caller. A rejected probe is validated in stack order.
+                                    val nextContext = try {
+                                        if (nextDefinition.motionInputs(next).all { id -> before.clips.any { it.id == id } })
+                                            capture(next).withUpstream(emptyList())
+                                        else null
+                                    } catch (_: IllegalArgumentException) { null }
+                                    if (nextContext != null && algorithmInstance(next) == next) ahead.start(index + 1, next, nextPlugin, before, nextContext)
+                                }
+                                val view = ModifierEvaluationInput(before, authorContext)
+                                val changes = plugin.changes(view, invocation, checkpoint)
+                                changes.requireWrites(requireNotNull(definition.changeWrites) { "${instance.type}: missing change write contract" })
+                                changes.applyWithResources(before, checkpoint, resolveRasters).also {
+                                    readCache[instance.id] = ModifierInputCache.ReadEntry(instance, plugin, authorContext, view.reads(), changes)
+                                }
+                            }
+                        }
+                        is ChangingModifierAlgorithmPlugin -> plugin.changes(before, invocation, authorContext, checkpoint).also {
+                            it.requireWrites(requireNotNull(definition.changeWrites) { "${instance.type}: missing change write contract" })
+                        }.applyWithResources(before, checkpoint, resolveRasters)
+                        is ContextualModifierAlgorithmPlugin -> plugin.evaluate(before, invocation, authorContext, checkpoint)
+                        else -> plugin.evaluate(before, invocation, checkpoint)
+                    }
+                }
+                // Both caches retain raw changes. Derived parameter order must be recomputed from the
+                // actual prefix rather than replayed as an algorithm-owned replacement of all parameters.
+                val raw = if (rawSourceRotations && cached == null)
+                    RawSourceRotationTransfer.apply(before, evaluated, instance, authorContext) else evaluated
+                // Applied nodes already contain the customized output; replay it exactly once.
+                val generated = normalizeResult(if (instance.id in stack.appliedNodes) raw else customizeGenerated(before, raw, instance))
+                if (inputKey != null && cached == null) algorithmCache[instance.id] = ModifierInputCache.Entry(instance, inputKey, ModifierInputCache.Patch(before, raw))
+                checkpoint()
+                validateParameters(before, generated, instance, resolved)
+                declared.forEach { parameter ->
+                    val actual = generated.parameters.singleOrNull { it.id == parameter.id }
+                    require(actual != null && compatible(actual, resolved.getValue(parameter.id))) { "${instance.id} did not produce parameter ${parameter.id}" }
+                }
+                val overrides = stack.overrides[instance.id].orEmpty()
+                val overridden = if (overrides.isEmpty()) ModifierOverrideResult(generated) else
+                    io.github.psd2live.core.RigBuildProfile.stage("modifier overrides") { applyOverrides(generated, instance, overrides) }
+                current = (if (overrides.isEmpty()) overridden.rig else normalizeResult(overridden.rig)).let { output ->
+                    if (physicsOrder.isEmpty()) output else output.copy(physics = output.physics.copy(
+                        groups = io.github.psd2live.core.PhysicsCatalog.ordered(output.physics.groups, physicsOrder) { it.id }))
+                }
+                // Global deformation stops may be owned by a later writer, while ranges remain upstream-owned.
+                require(overridden.parameterOverrides.all { (id, parameter) ->
+                    existing[id]?.let { parameter.copy(keys = it.keys) == it } ?: true
+                }) {
+                    "${instance.id} cannot override the range of a parameter provided upstream"
+                }
+                validateParameters(generated, current, instance, overridden.parameterOverrides)
+                val contributions = contributions(before, current) + definition.references(before, current, instance) + declared.filter { it.id in existing && compatible(existing.getValue(it.id), current.parameters.single { actual -> actual.id == it.id }) }.map {
+                    ModifierContribution("parameter", it.id, ModifierChange.REUSED)
+                }
+                val algorithmWrites = stack.appliedNodes[instance.id]?.algorithmWrites
+                    ?: contributions(before, generated).filter { it.change != ModifierChange.REUSED }
+                        .map { ModifierWrite(it.kind, it.id) }
+                for (contribution in algorithmWrites) {
+                    val key = contribution.kind to contribution.id
+                    val previous = writers[key]
+                    require(previous == null || contribution.kind in definition.composableKinds && contribution.kind in previous.second.composableKinds) {
+                        "${previous?.first} and ${instance.id} have incompatible writes to ${contribution.kind} ${contribution.id}"
+                    }
+                    writers[key] = instance.id to definition
+                }
+                val keyforms = io.github.psd2live.core.RigBuildProfile.stage("modifier keyform ownership") { ownedKeyforms(before, generated) }
+                val capability = stack.appliedNodes[instance.id]?.capability ?: instance.capability(definition.appliedConfig(instance), definition.provides)
+                entries += ModifierEvaluation(instance, ModifierStatus.ACTIVE, contributions = contributions,
+                    ownedKeyforms = keyforms, overrideIssues = overridden.issues, algorithmWrites = algorithmWrites)
+                available += capability
                 outputs += current
-                continue
+            } catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException ||
+                    Thread.currentThread().isInterrupted) throw failure
+                if (!isolateFailures) throw ModifierEvaluationFailure(instance.id, failure)
+                // No write, ownership reservation, or speculative cache result from a failed
+                // instance may leak into independent consumers later in the stack.
+                current = beforeEntry
+                exclusive.clear(); exclusive.putAll(beforeExclusive)
+                writers.clear(); writers.putAll(beforeWriters)
+                algorithmCache.remove(instance.id)
+                readCache.remove(instance.id)
+                authorContexts.remove(instance.id)
+                entries += ModifierEvaluation(instance, ModifierStatus.FAILED,
+                    error = failure.message?.takeIf { it.isNotBlank() } ?: failure.javaClass.simpleName,
+                    errorDetails = failure.stackTraceToString())
+                outputs += current
             }
-            definition.exclusiveFamily?.let { family -> instance.targets.forEach { target ->
-                val previous = exclusive.put(family to target, instance.id to instance.type)
-                require(previous == null) {
-                    "Modifiers ${previous?.first} (${previous?.second}) and ${instance.id} (${instance.type}) are mutually exclusive on ${target.id} (family $family)"
-                }
-            } }
-            validateTargets(current, instance)
-            RigBuildProfile.modifierStage("validation", instance.type) { definition.validate(current, instance) }
-            val declared = RigBuildProfile.modifierStage("parameters", instance.type) { definition.parameters(instance) }
-            require(declared.map { it.id }.distinct().size == declared.size) { "${instance.id} declares duplicate parameters" }
-            val existing = current.parameters.associateBy { it.id }
-            val resolved = declared.associate { parameter ->
-                val before = existing[parameter.id]
-                val desired = if (before == null || compatible(before, parameter)) parameter
-                    else definition.resolveParameter(instance, before, parameter)
-                require(desired != null && desired.id == parameter.id) { "${instance.id}: incompatible parameter ${parameter.id}" }
-                parameter.id to desired
-            }
-            io.github.psd2live.core.RigBuildProfile.count("modifier cache misses")
-            val before = current
-            val capturedContext = RigBuildProfile.modifierStage("input", instance.type) { capture(instance) }
-            val authorContext = if (definition.upstreamInputs || definition.plugin is ReadingModifierAlgorithmPlugin) {
-                val providers = definition.providers(instance)
-                val capabilities = (definition.requires + definition.optionalUpstream).sorted().flatMap { required ->
-                    available.filter { registry.provides(it, required) &&
-                        it.targets.any { target -> target in instance.targets } &&
-                        (providers[required] == null || it.id == providers[required]) }.map {
-                        ModifierUpstreamCapability(required, it.type, it.version, it.targets, it.id, it.config, it.outputAliases, it.plugin)
-                    }
-                }
-                capturedContext.withUpstream(capabilities)
-            } else capturedContext
-            val inputKey = if (definition.plugin is ReadingModifierAlgorithmPlugin) null else
-                definition.cacheReads?.let { ModifierInputCache.input(before, it) to authorContext }
-            val cached = algorithmCache[instance.id]?.takeIf { it.instance == instance && it.input == inputKey }
-            val invocation = algorithmInstance(instance)
-            val evaluated = if (cached != null) {
-                io.github.psd2live.core.RigBuildProfile.count("modifier dependency cache hits")
-                cached.patch.apply(before)
-            } else RigBuildProfile.modifierStage("evaluate", instance.type) {
-                val plugin = definition.plugin
-                when (plugin) {
-                    is ReadingModifierAlgorithmPlugin -> {
-                        val speculative = ahead.take(index)
-                        val cachedRead = (speculative ?: readCache[instance.id])?.takeIf {
-                            it.instance == instance && it.plugin === plugin && it.context == authorContext && it.reads.matches(before, authorContext)
-                        }
-                        val reused = cachedRead?.let {
-                            it.changes.requireWrites(requireNotNull(definition.changeWrites) { "${instance.type}: missing change write contract" })
-                            // Writes have their own preconditions even when a plugin did not read that object.
-                            try { it.changes.applyWithResources(before, checkpoint, resolveRasters) } catch (_: IllegalArgumentException) { null }
-                        }
-                        if (reused != null) {
-                            if (speculative != null && cachedRead === speculative) {
-                                RigBuildProfile.count("modifier parallel evaluations")
-                                readCache[instance.id] = speculative
-                            } else RigBuildProfile.count("modifier read cache hits")
-                            reused
-                        } else {
-                            val next = stack.instances.getOrNull(index + 1)
-                            val nextDefinition = definitions.getOrNull(index + 1)
-                            val nextPlugin = nextDefinition?.plugin as? ReadingModifierAlgorithmPlugin
-                            if (next != null && next.enabled && nextDefinition != null && nextPlugin != null &&
-                                nextDefinition.requires.isEmpty() && nextDefinition.optionalUpstream.isEmpty() &&
-                                nextDefinition.exclusiveFamily == null && next.id !in readCache &&
-                                physicsOrder.isEmpty() && stack.overrides[instance.id].isNullOrEmpty() &&
-                                ahead.canOverlap(definition, nextDefinition) &&
-                                next.parameterProviders.all { (parameter, provider) ->
-                                    available.any { it.id == provider } && parameter in existing
-                                }) {
-                                // Source capture stays on the caller. A rejected probe is validated in stack order.
-                                val nextContext = try {
-                                    if (nextDefinition.motionInputs(next).all { id -> before.clips.any { it.id == id } })
-                                        capture(next).withUpstream(emptyList())
-                                    else null
-                                } catch (_: IllegalArgumentException) { null }
-                                if (nextContext != null && algorithmInstance(next) == next) ahead.start(index + 1, next, nextPlugin, before, nextContext)
-                            }
-                            val view = ModifierEvaluationInput(before, authorContext)
-                            val changes = plugin.changes(view, invocation, checkpoint)
-                            changes.requireWrites(requireNotNull(definition.changeWrites) { "${instance.type}: missing change write contract" })
-                            changes.applyWithResources(before, checkpoint, resolveRasters).also {
-                                readCache[instance.id] = ModifierInputCache.ReadEntry(instance, plugin, authorContext, view.reads(), changes)
-                            }
-                        }
-                    }
-                    is ChangingModifierAlgorithmPlugin -> plugin.changes(before, invocation, authorContext, checkpoint).also {
-                        it.requireWrites(requireNotNull(definition.changeWrites) { "${instance.type}: missing change write contract" })
-                    }.applyWithResources(before, checkpoint, resolveRasters)
-                    is ContextualModifierAlgorithmPlugin -> plugin.evaluate(before, invocation, authorContext, checkpoint)
-                    else -> plugin.evaluate(before, invocation, checkpoint)
-                }
-            }
-            // Both caches retain raw changes. Derived parameter order must be recomputed from the
-            // actual prefix rather than replayed as an algorithm-owned replacement of all parameters.
-            val raw = if (rawSourceRotations && cached == null)
-                RawSourceRotationTransfer.apply(before, evaluated, instance, authorContext) else evaluated
-            val generated = normalizeResult(customizeGenerated(before, raw, instance))
-            if (inputKey != null && cached == null) algorithmCache[instance.id] = ModifierInputCache.Entry(instance, inputKey, ModifierInputCache.Patch(before, raw))
-            checkpoint()
-            validateParameters(before, generated, instance, resolved)
-            declared.forEach { parameter ->
-                val actual = generated.parameters.singleOrNull { it.id == parameter.id }
-                require(actual != null && compatible(actual, resolved.getValue(parameter.id))) { "${instance.id} did not produce parameter ${parameter.id}" }
-            }
-            val overrides = stack.overrides[instance.id].orEmpty()
-            val overridden = if (overrides.isEmpty()) ModifierOverrideResult(generated) else
-                io.github.psd2live.core.RigBuildProfile.stage("modifier overrides") { applyOverrides(generated, instance, overrides) }
-            current = (if (overrides.isEmpty()) overridden.rig else normalizeResult(overridden.rig)).let { output ->
-                if (physicsOrder.isEmpty()) output else output.copy(physics = output.physics.copy(
-                    groups = io.github.psd2live.core.PhysicsCatalog.ordered(output.physics.groups, physicsOrder) { it.id }))
-            }
-            // A global key edit may live on the last track writer rather than the parameter's
-            // provider. It can change stops, but never another provider's range or definition.
-            require(overridden.parameterOverrides.all { (id, parameter) ->
-                existing[id]?.let { parameter.copy(keys = it.keys) == it } ?: true
-            }) {
-                "${instance.id} cannot override the range of a parameter provided upstream"
-            }
-            validateParameters(generated, current, instance, overridden.parameterOverrides)
-            val contributions = contributions(before, current) + definition.references(before, current, instance) + declared.filter { it.id in existing && compatible(existing.getValue(it.id), current.parameters.single { actual -> actual.id == it.id }) }.map {
-                ModifierContribution("parameter", it.id, ModifierChange.REUSED)
-            }
-            for (contribution in contributions.filter { it.change != ModifierChange.REUSED }) {
-                val key = contribution.kind to contribution.id
-                val previous = writers[key]
-                require(previous == null || contribution.kind in definition.composableKinds && contribution.kind in previous.second.composableKinds) {
-                    "${previous?.first} and ${instance.id} have incompatible writes to ${contribution.kind} ${contribution.id}"
-                }
-                writers[key] = instance.id to definition
-            }
-            val keyforms = io.github.psd2live.core.RigBuildProfile.stage("modifier keyform ownership") { ownedKeyforms(before, current) }
-            entries += ModifierEvaluation(instance, ModifierStatus.ACTIVE, contributions = contributions,
-                ownedKeyforms = keyforms, overrideIssues = overridden.issues)
-            available += instance.capability(definition.appliedConfig(instance), definition.provides)
-            outputs += current
         }
         checkpoint()
         require(pluginRevision == ModifierPluginStore.shared.revision.value) { "Algorithm plugins changed during evaluation; retry the edit" }
-        cache?.snapshot = RigModifierEvaluationCache.Snapshot(context, authored, stack, entries, outputs, pluginRevision, algorithmCache, authorContexts, readCache)
+        cache?.snapshot = RigModifierEvaluationCache.Snapshot(context, authored, stack, entries, outputs, pluginRevision, algorithmCache, authorContexts, readCache,
+            capabilities = available.mapNotNull { capability -> capability.id?.let { it to capability } }.toMap())
         return RigModifierResult(current, entries)
     }
 
@@ -403,7 +458,7 @@ internal class RigModifierEvaluator(
     fun validateOrder(stack: RigModifierStack) = validateOrder(stack, resolveDefinitions(stack))
 
     private fun resolveDefinitions(stack: RigModifierStack) = stack.instances.map { instance ->
-        registry.definitionOrNull(instance)?.takeIf {
+        stack.appliedNodes[instance.id]?.definition(instance) ?: registry.definitionOrNull(instance)?.takeIf {
             ModifierPluginCatalog.available(instance.type, instance.version, instance.plugin)
         }
     }
@@ -445,9 +500,11 @@ internal class RigModifierEvaluator(
                 val providers = definition.providers(instance)
                 for (type in definition.requires) for (target in instance.targets) {
                     val provider = providers[type]
+                    fun provides(candidate: RigModifierInstance) = stack.appliedNodes[candidate.id]?.capability?.let { registry.provides(it, type) }
+                        ?: registry.provides(candidate, type)
                     val earlier = stack.appliedCapabilities.any { registry.provides(it, type) && target in it.targets && (provider == null || it.id == provider) } ||
-                        prefix.any { it.enabled && registry.provides(it, type) && target in it.targets && (provider == null || it.id == provider) }
-                    val later = suffix.any { it.enabled && registry.provides(it, type) && target in it.targets && (provider == null || it.id == provider) }
+                        prefix.any { it.enabled && provides(it) && target in it.targets && (provider == null || it.id == provider) }
+                    val later = suffix.any { it.enabled && provides(it) && target in it.targets && (provider == null || it.id == provider) }
                     require(earlier || !later) { "${instance.id} must follow ${provider ?: type} ($type) on ${target.id}" }
                 }
             }
@@ -462,23 +519,68 @@ internal class RigModifierEvaluator(
     fun applyThrough(authored: RigIR, stack: RigModifierStack, id: String, checkpoint: () -> Unit = {}): AppliedModifierPrefix {
         val end = stack.index(id) + 1
         val complete = evaluate(authored, stack, checkpoint = checkpoint)
+        val plan = ModifierApplyPlan.prepare(stack, id, complete.report().getValue("entries").jsonArray
+            .associate { it.jsonObject.getValue("id").jsonPrimitive.content to it.jsonObject }, registry)
+        require(plan.getValue("can_apply").jsonPrimitive.boolean) {
+            "Cannot apply modifiers: ${plan.getValue("blockers")}. Resolve missing dependencies or authored corrections first."
+        }
         val prefix = evaluate(authored, stack.copy(instances = stack.instances.take(end),
+            appliedNodes = stack.appliedNodes.filterKeys { owner -> stack.instances.take(end).any { it.id == owner } },
             overrides = stack.overrides.filterKeys { owner -> owner in stack.retiredIds || stack.instances.take(end).any { it.id == owner } }), checkpoint = checkpoint)
-        require(prefix.entries.none { it.status == ModifierStatus.MISSING_DEPENDENCY || it.status == ModifierStatus.MISSING_PLUGIN }) { "Cannot apply a prefix with missing dependencies or plugins" }
+        require(prefix.entries.none { it.status in setOf(ModifierStatus.FAILED, ModifierStatus.MISSING_DEPENDENCY, ModifierStatus.MISSING_PLUGIN) }) { "Cannot apply a prefix with failed or missing dependencies or plugins" }
         require(prefix.entries.none { it.overrideIssues.any { issue -> issue.kind == io.github.psd2live.core.GeneratedOverrideIssueKind.ORPHANED } }) {
             "Cannot apply a prefix with overrides that no longer match their generated content"
         }
         val consumed = stack.instances.take(end).mapTo(HashSet()) { it.id }
         val capabilities = prefix.entries.filter { it.status == ModifierStatus.ACTIVE }.map {
-            val definition = registry.definition(it.instance)
-            it.instance.capability(definition.appliedConfig(it.instance), definition.provides)
+            stack.appliedNodes[it.instance.id]?.capability ?: registry.definition(it.instance).let { definition ->
+                it.instance.capability(definition.appliedConfig(it.instance), definition.provides)
+            }
         }
         val baked = prefix.entries.filter { it.status == ModifierStatus.ACTIVE }.mapTo(HashSet()) { it.instance.id }
         val remaining = stack.copy(instances = stack.instances.drop(end), overrides = stack.overrides - baked,
+            appliedNodes = stack.appliedNodes - consumed,
             retiredIds = stack.retiredIds + consumed, appliedCapabilities = (stack.appliedCapabilities + capabilities).distinct())
         val result = evaluate(prefix.rig, remaining, checkpoint = checkpoint)
+        require(result.entries.none { entry -> entry.instance.enabled &&
+            (entry.status != ModifierStatus.ACTIVE || entry.overrideIssues.any {
+                it.kind == io.github.psd2live.core.GeneratedOverrideIssueKind.ORPHANED
+            }) }) { "Applying this prefix would invalidate retained modifiers or their authored corrections" }
         require(complete.rig == result.rig) { "Applying this prefix would change the remaining modifiers' result" }
         return AppliedModifierPrefix(prefix.rig, remaining, result)
+    }
+
+    /** Freeze one stage without moving it in front of its ancestors. Full-result equality remains mandatory. */
+    fun applySelected(authored: RigIR, stack: RigModifierStack, id: String, checkpoint: () -> Unit = {}): RigModifierStack {
+        require(id !in stack.appliedNodes) { "This content is already applied" }
+        val index = stack.index(id)
+        val instance = stack.instances[index]
+        require(instance.enabled) { "Enable the selected modifier before applying its output" }
+        val cache = RigModifierEvaluationCache()
+        val complete = evaluate(authored, stack, cache, checkpoint = checkpoint)
+        require(complete.entries.all { !it.instance.enabled || it.status == ModifierStatus.ACTIVE && it.overrideIssues.none {
+            issue -> issue.kind == io.github.psd2live.core.GeneratedOverrideIssueKind.ORPHANED
+        } }) { "Resolve failed dependencies and unmatched authored edits before applying" }
+        val snapshot = requireNotNull(cache.snapshot)
+        val definition = registry.definition(instance)
+        val input = if (index == 0) authored else snapshot.outputs[index - 1]
+        val output = snapshot.outputs[index]
+        val readKeys = snapshot.readAlgorithms[id]?.reads?.keys?.filter { it.section !in setOf("context", "upstream") }
+        val node = AppliedModifierNode(AppliedModifierNode.encode(input), AppliedModifierNode.encode(output),
+            snapshot.capabilities.getValue(id), definition.requires, definition.providers(instance),
+            definition.composableKinds, definition.exclusiveFamily, readKeys,
+            motionInputs = definition.motionInputs(instance), motionOutputs = definition.motionOutputs(instance),
+            algorithmWrites = snapshot.entries[index].algorithmWrites,
+            physicsValidationOnly = definition.plugin is io.github.psd2live.algorithms.physics.PendulumAlgorithm,
+            patchInputs = snapshot.entries[index].contributions.filter { it.change in setOf(ModifierChange.MODIFIED, ModifierChange.REMOVED) }
+                .map { ModifierWrite(it.kind, it.id) }.distinct())
+            .captureMotion(instance).capturePhysics()
+        val candidate = stack.copy(appliedNodes = stack.appliedNodes + (id to node), overrides = stack.overrides - id)
+        val verified = evaluate(authored, candidate, checkpoint = checkpoint)
+        require(verified.rig == complete.rig && verified.entries.all { !it.instance.enabled || it.status == ModifierStatus.ACTIVE }) {
+            "Applying the selected modifier would change the retained result"
+        }
+        return candidate
     }
 
     private fun compatible(a: Parameter, b: Parameter) =
@@ -539,30 +641,40 @@ internal class RigModifierEvaluator(
     private fun ownedKeyforms(before: RigIR, after: RigIR): List<ModifierKeyform> = buildList {
         fun <F> forms(kind: String, id: String, previous: io.github.psd2live.format.model.KeyGrid<F>?,
                       next: io.github.psd2live.format.model.KeyGrid<F>?, channel: String? = null) {
-            if (next == null || previous?.axes == next.axes) return
-            val old = previous?.axes.orEmpty().associateBy { it.parameter }
-            if (old.keys != next.axes.mapTo(HashSet()) { it.parameter }) {
-                next.axes.filter { it.parameter !in old }.forEach { add(ModifierKeyform(kind, id, it.parameter, channel)) }
-                return
+            if (next == null || previous == next) return
+            val oldAxes = previous?.axes.orEmpty().associateBy { it.parameter }
+            if (oldAxes.keys != next.axes.mapTo(HashSet()) { it.parameter }) {
+                val addedAxes = next.axes.filter { it.parameter !in oldAxes }
+                addedAxes.forEach { add(ModifierKeyform(kind, id, it.parameter, channel)) }
+                if (addedAxes.isNotEmpty()) return
             }
-            val addedIndices = next.axes.map { axis ->
-                val previousKeys = old.getValue(axis.parameter).keys
-                BooleanArray(axis.keys.size) { key ->
-                    (0 until previousKeys.size).none { previousKeys[it] == axis.keys[key] }
-                }
-            }
-            if (addedIndices.none { keys -> keys.any { it } }) return
+            // Ownership follows every actual write, including changes on an existing axis or rest cell.
+            fun coordinate(axes: List<io.github.psd2live.format.model.KeyAxis>, cell: io.github.psd2live.format.model.KeyCell<F>) =
+                axes.mapIndexed { index, axis -> axis.parameter to axis.keys[cell.coordinate[index]] }.toMap()
+            val previousCells = previous?.cells.orEmpty().associateBy { coordinate(previous!!.axes, it) }
             for (cell in next.cells) {
-                val changed = addedIndices.indices.firstOrNull { addedIndices[it][cell.coordinate[it]] } ?: continue
-                val key = next.axes.mapIndexed { index, axis -> axis.parameter to axis.keys[cell.coordinate[index]] }.toMap()
-                add(ModifierKeyform(kind, id, next.axes[changed].parameter, channel, key))
+                val key = coordinate(next.axes, cell)
+                if (previousCells[key]?.form == cell.form) continue
+                val changedAxis = next.axes.firstOrNull { axis ->
+                    val old = oldAxes[axis.parameter]?.keys
+                    old == null || (0 until old.size).none { old[it] == key[axis.parameter] }
+                } ?: next.axes.firstOrNull()
+                add(ModifierKeyform(kind, id, changedAxis?.parameter.orEmpty(), channel, key))
             }
         }
+
         fun channels(kind: String, id: String, previous: io.github.psd2live.format.model.Channels, next: io.github.psd2live.format.model.Channels) {
             if (previous === next) return
             for ((channel, grid) in next) forms(kind, id, previous[channel], grid, channel.name.lowercase())
         }
         if (before.deformers !== after.deformers) {
+            val rotations = before.deformers.filterIsInstance<Deformer.Rotation>().associateBy { it.id }
+            for (rotation in after.deformers.filterIsInstance<Deformer.Rotation>()) {
+                val previous = rotations[rotation.id]
+                if (previous === rotation) continue
+                forms("rotation", rotation.id, previous?.pivot, rotation.pivot)
+                channels("rotation", rotation.id, previous?.channels.orEmpty(), rotation.channels)
+            }
             val warps = before.deformers.filterIsInstance<Deformer.Warp>().associateBy { it.id }
             for (warp in after.deformers.filterIsInstance<Deformer.Warp>()) {
                 val previous = warps[warp.id]

@@ -40,6 +40,103 @@ class RigModifierStackTest {
     private val registry = RigModifierRegistry(listOf(add, multiply))
     private val evaluator = RigModifierEvaluator(registry)
 
+    @Test fun evaluationFailureIdentifiesTheInstanceWithoutPublishingPartialResults() {
+        val failure = IllegalArgumentException("unsupported artwork")
+        val broken = RigModifierDefinition("broken", 1, plugin = ModifierAlgorithmPlugin { _, _, _ -> throw failure })
+        val engine = RigModifierEvaluator(RigModifierRegistry(listOf(add, broken)))
+        val stack = RigModifierStack(listOf(entry("good", "add"), entry("bad", "broken")))
+        val cache = RigModifierEvaluationCache()
+        val caught = assertFailsWith<ModifierEvaluationFailure> { engine.evaluate(authored, stack, cache) }
+        assertEquals("bad", caught.instanceId)
+        assertSame(failure, caught.cause)
+        assertNull(cache.snapshot)
+        val recovered = stack.update("bad") { it.copy(enabled = false) }.copy(initializationFailures = mapOf("bad" to failure.message!!))
+        assertEquals(recovered, RigModifierStack.fromJson(recovered.toJson()))
+        assertEquals(510, engine.evaluate(authored, recovered).rig.parts.first().drawOrder)
+    }
+
+    @Test fun evaluationDoesNotWrapCancellation() {
+        val cancellation = java.util.concurrent.CancellationException("cancelled")
+        val broken = RigModifierDefinition("broken", 1, plugin = ModifierAlgorithmPlugin { _, _, _ -> throw cancellation })
+        val engine = RigModifierEvaluator(RigModifierRegistry(listOf(broken)))
+        assertSame(cancellation, assertFailsWith<java.util.concurrent.CancellationException> {
+            engine.evaluate(authored, RigModifierStack(listOf(entry("bad", "broken"))))
+        })
+    }
+
+    @Test fun isolatedFailuresSuspendOnlyTheirTransitiveDependentsAndRemainCached() {
+        var attempts = 0
+        val broken = RigModifierDefinition("broken", 1, plugin = ModifierAlgorithmPlugin { _, _, _ ->
+            attempts++; error("broken input")
+        })
+        val dependent = transform("dependent", { it + 1 }, requires = setOf("broken"))
+        val descendant = transform("descendant", { it + 1 }, requires = setOf("dependent"))
+        val engine = RigModifierEvaluator(RigModifierRegistry(listOf(broken, dependent, descendant, add)))
+        val stack = RigModifierStack(listOf(entry("bad", "broken"), entry("child", "dependent"),
+            entry("grandchild", "descendant"), entry("independent", "add")))
+        val cache = RigModifierEvaluationCache()
+        val result = engine.evaluate(authored, stack, cache, isolateFailures = true)
+        assertEquals(listOf(ModifierStatus.FAILED, ModifierStatus.MISSING_DEPENDENCY,
+            ModifierStatus.MISSING_DEPENDENCY, ModifierStatus.ACTIVE), result.entries.map { it.status })
+        assertEquals(510, result.rig.parts.first().drawOrder)
+        assertEquals("broken input", result.entries.first().error)
+        assertEquals(result, engine.evaluate(authored, stack, cache, isolateFailures = true))
+        assertEquals(1, attempts, "An unrelated rebuild must not continuously restart a failed plugin")
+        val retry = stack.copy(retryRevisions = mapOf("bad" to 1L))
+        engine.evaluate(authored, retry, cache, isolateFailures = true)
+        assertEquals(2, attempts, "Re-enabling a suspended plugin must perform a fresh attempt")
+        assertFailsWith<ModifierEvaluationFailure> { engine.evaluate(authored, stack, cache) }
+    }
+
+    @Test fun lateFailureRollsBackGeometryOwnershipAndExclusiveReservations() {
+        val broken = transform("broken", { 999 }, family = "one").copy(references = { _, _, _ -> error("late failure") })
+        val independent = transform("independent", { it + 10 }, family = "one")
+        val engine = RigModifierEvaluator(RigModifierRegistry(listOf(broken, independent)))
+        val result = engine.evaluate(authored, RigModifierStack(listOf(entry("bad", "broken"), entry("good", "independent"))),
+            isolateFailures = true)
+        assertEquals(listOf(ModifierStatus.FAILED, ModifierStatus.ACTIVE), result.entries.map { it.status })
+        assertEquals(510, result.rig.parts.first().drawOrder)
+        assertTrue(result.entries.first().contributions.isEmpty())
+    }
+
+    @Test fun missingPluginsBlockSelectedConsumersButNotIndependentOnes() {
+        val consumer = transform("consumer", { it + 1 }).copy(providers = { mapOf("unavailable" to "missing") })
+        val engine = RigModifierEvaluator(RigModifierRegistry(listOf(consumer, add)))
+        val result = engine.evaluate(authored, RigModifierStack(listOf(entry("missing", "unavailable"),
+            entry("child", "consumer"), entry("good", "add"))), isolateFailures = true)
+        assertEquals(listOf(ModifierStatus.MISSING_PLUGIN, ModifierStatus.MISSING_DEPENDENCY, ModifierStatus.ACTIVE),
+            result.entries.map { it.status })
+        assertEquals(510, result.rig.parts.first().drawOrder)
+    }
+
+    @Test fun changedAuthorCaptureFailuresRemainLocalAndCachedCapabilitiesDoNotRerunCallbacks() {
+        var brokenCapture = false
+        var configCalls = 0
+        val contextual = add.copy(authorContext = {
+            check(!brokenCapture) { "capture failed" }; ModifierAlgorithmContext.Empty
+        }, appliedConfig = { configCalls++; JsonObject(emptyMap()) })
+        val engine = RigModifierEvaluator(RigModifierRegistry(listOf(contextual)))
+        val cache = RigModifierEvaluationCache()
+        val stack = RigModifierStack(listOf(entry("first", "add")))
+        engine.evaluate(authored, stack, cache, isolateFailures = true)
+        engine.evaluate(authored, stack, cache, isolateFailures = true)
+        assertEquals(1, configCalls)
+        brokenCapture = true
+        val result = engine.evaluate(authored, stack, cache, isolateFailures = true)
+        assertEquals(ModifierStatus.FAILED, result.entries.single().status)
+        assertEquals(authored, result.rig)
+    }
+
+    @Test fun isolationStillPropagatesCancellationWithoutPublishingPartialResults() {
+        val engine = RigModifierEvaluator(RigModifierRegistry(listOf(add, RigModifierDefinition("stop", 1,
+            plugin = ModifierAlgorithmPlugin { _, _, _ -> throw java.util.concurrent.CancellationException("cancel") }))))
+        val cache = RigModifierEvaluationCache()
+        assertFailsWith<java.util.concurrent.CancellationException> {
+            engine.evaluate(authored, RigModifierStack(listOf(entry("good", "add"), entry("stop", "stop"))), cache, isolateFailures = true)
+        }
+        assertNull(cache.snapshot)
+    }
+
     @Test fun cachedPrefixesMatchColdEvaluationAndDoNotPublishFailures() {
         val calls = ArrayList<String>()
         val counted = RigModifierDefinition("counted", 1, composableKinds = setOf("part"), plugin = ModifierAlgorithmPlugin { rig, instance, _ ->
@@ -231,6 +328,28 @@ class RigModifierStackTest {
             ModifierKeyform("mesh", mesh.id, "x", key = mapOf("x" to 1f, "y" to 2f)),
             ModifierKeyform("mesh", mesh.id, "y", channel = "opacity"),
         ), result.entries.single().ownedKeyforms)
+    }
+
+    @Test fun existingCellEditsBelongToTheLastWriterRatherThanItsCreator() {
+        val axes = listOf(KeyAxis("x", Floats.values(0f, 1f)))
+        val mesh = Mesh("mesh", "Mesh", null, geometry = null, offsets = KeyGrid(axes, listOf(
+            KeyCell(Ints.values(0), MeshOffsets(Floats.values(0f, 0f))),
+            KeyCell(Ints.values(1), MeshOffsets(Floats.values(1f, 0f))))))
+        fun writer(type: String, value: Float) = RigModifierDefinition(type, 1, composableKinds = setOf("mesh"),
+            plugin = ModifierAlgorithmPlugin { rig, _, _ -> rig.copy(meshes = rig.meshes.map { m ->
+                m.copy(offsets = m.offsets!!.copy(cells = m.offsets!!.cells.map { cell ->
+                    if (cell.coordinate[0] == 1) cell.copy(form = MeshOffsets(Floats.values(value, 0f))) else cell
+                }))
+            }) })
+        val engine = RigModifierEvaluator(RigModifierRegistry(listOf(writer("first", 2f), writer("last", 3f))))
+        val base = authored.copy(meshes = listOf(mesh), parameters = listOf(Parameter("x", "X", 0f, 1f, 0f)))
+        val stack = RigModifierStack(listOf("first", "last").map { entry(it, it, targets = listOf(ModifierTarget("mesh", "mesh"))) })
+        val result = engine.evaluate(base, stack)
+        val cell = ModifierKeyform("mesh", "mesh", "x", key = mapOf("x" to 1f))
+        assertTrue(result.entries.all { it.ownedKeyforms == listOf(cell) })
+        val graph = DocumentGenerators.graph(RigEditOverlay(), modifierReport = result.report())
+        assertEquals("modifier:last", DocumentGenerators.owner(graph, DocumentGenerators.keyformCell("mesh", "mesh", mapOf("x" to 1f)))?.id)
+        assertNull(DocumentGenerators.owner(graph, DocumentGenerators.keyformCell("mesh", "mesh", mapOf("x" to 0f))))
     }
 
     @Test fun registryRejectsCyclesUnknownDependenciesAndDuplicateVersions() {

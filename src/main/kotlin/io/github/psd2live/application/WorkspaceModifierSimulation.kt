@@ -26,16 +26,16 @@ internal object WorkspaceModifierSimulation {
     }
 
     fun prepare(document: WorkspaceDocument, stack: RigModifierStack, work: WorkspaceRasterWork,
-                allowRebake: Boolean = true, validatedPrefix: Int = 0,
+                allowRebake: Boolean = true, validatedPrefix: Int = 0, isolateFailures: Boolean = true,
                 pipeline: PSD2LivePipeline = PSD2LivePipeline().apply { deferRuntimeBundles = true }, evaluated: RigPreviewModel? = null): RigModifierStack {
         require(validatedPrefix in 0..stack.instances.size)
-        if (stack.instances.any { it.enabled && !ModifierPluginCatalog.available(it) }) return stack
         pipeline.reuseModifierInputs(evaluated)
         var next = stack
         for (index in stack.instances.indices) {
             work.checkpoint()
             val instance = next.instances[index]
-            if (!instance.enabled || instance.type != "simulation") continue
+            if (!instance.enabled || instance.type != "simulation" || instance.id in next.appliedNodes) continue
+            try {
             val source = RigSimEdit.fromJson(instance.config)
             require(source.enabled && source.targets == instance.targets.map { it.id } && instance.targets.all { it.kind == "mesh" }) {
                 "${instance.id}: simulation configuration must match its captured mesh targets"
@@ -77,6 +77,14 @@ internal object WorkspaceModifierSimulation {
             )) }
             work.checkpoint()
             next = next.update(instance.id) { it.copy(config = JsonObject(instance.config + source.copy(bake = bake).toJson()), inputFingerprint = fingerprint) }
+            } catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException ||
+                    Thread.currentThread().isInterrupted) throw failure
+                if (!allowRebake || !isolateFailures) throw failure
+                next = next.update(instance.id) { it.copy(enabled = false) }.copy(
+                    initializationFailures = next.initializationFailures + (instance.id to
+                        (failure.message ?: failure.javaClass.simpleName)))
+            }
         }
         return next
     }
@@ -84,7 +92,9 @@ internal object WorkspaceModifierSimulation {
     fun unchangedPrefix(before: RigModifierStack, after: RigModifierStack): Int {
         if (before.appliedCapabilities != after.appliedCapabilities) return 0
         return before.instances.zip(after.instances).takeWhile { (a, b) ->
-            a == b && before.overrides[a.id].orEmpty() == after.overrides[b.id].orEmpty()
+            a == b && before.overrides[a.id].orEmpty() == after.overrides[b.id].orEmpty() &&
+                before.appliedNodes[a.id] == after.appliedNodes[b.id] &&
+                before.retryRevisions[a.id] == after.retryRevisions[b.id]
         }.size
     }
 }

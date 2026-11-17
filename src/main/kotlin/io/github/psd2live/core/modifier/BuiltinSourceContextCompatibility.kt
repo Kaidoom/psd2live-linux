@@ -6,23 +6,34 @@ import java.util.zip.ZipFile
 
 /** Compatibility for built-in archives that changed their input schema without changing package version. */
 internal object BuiltinSourceContextCompatibility {
-    private val mouthContexts = ConcurrentHashMap<ModifierPluginReference, Boolean>()
+    private val contexts = ConcurrentHashMap<Triple<ModifierPluginReference, String, String>, Boolean>()
 
-    fun supportsMouthScaffold(instance: RigModifierInstance, store: ModifierPluginStore = ModifierPluginStore.shared): Boolean {
+    fun supportsMouthScaffold(instance: RigModifierInstance, store: ModifierPluginStore = ModifierPluginStore.shared): Boolean =
+        supports(instance, "MouthFittedSourceAlgorithm", MouthFittedSourceAlgorithm.COARSE_CONTEXT, store)
+
+    /** 3.8.2 introduced a new outline selection policy together with richer submodule captures. */
+    fun supportsMouthRibbons(instance: RigModifierInstance, store: ModifierPluginStore = ModifierPluginStore.shared): Boolean =
+        supports(instance, "MouthVowelAlgorithm\$Companion", "outlineRibbons", store)
+
+    fun supportsChainLabels(instance: RigModifierInstance, store: ModifierPluginStore = ModifierPluginStore.shared): Boolean =
+        supports(instance, "ChainLabels", "chain_labels", store)
+
+    private fun supports(instance: RigModifierInstance, className: String, field: String, store: ModifierPluginStore): Boolean {
         val reference = instance.plugin ?: return true
-        if (!reference.id.startsWith("builtin.") || reference == BuiltinModifierPlugins.reference(instance.type, instance.version)) return true
-        mouthContexts[reference]?.let { return it }
+        if (!reference.id.startsWith("builtin.") || reference == BuiltinModifierPlugins.entry(reference.id)?.reference) return true
+        val key = Triple(reference, className, field)
+        contexts[key]?.let { return it }
         val entry = store.findRunnable(reference) ?: return false
-        // Both old and new workers were published as 1.0.64. Their digest proves identity, not
-        // schema age. The new worker's public context-key constant is the distinguishing marker.
+        // Package versions were reused across source-contract changes. Detect the supported key
+        // in the immutable worker rather than treating every noncurrent digest as an old schema.
         // Inspect its immutable payload without loading or executing archived classes in the host.
         val supported = ZipFile(entry.directory.resolve("runtime.jar").toFile()).use { jar ->
-            val file = jar.getEntry("io/github/psd2live/algorithms/binding/MouthFittedSourceAlgorithm.class") ?: return@use false
+            val file = jar.getEntry("io/github/psd2live/algorithms/binding/$className.class") ?: return@use false
             val bytes = jar.getInputStream(file).use { it.readNBytes(1024 * 1024) }
-            val marker = MouthFittedSourceAlgorithm.COARSE_CONTEXT.toByteArray(Charsets.UTF_8)
+            val marker = field.toByteArray(Charsets.UTF_8)
             (0..bytes.size - marker.size).any { offset -> marker.indices.all { bytes[offset + it] == marker[it] } }
         }
-        mouthContexts[reference] = supported
+        contexts[key] = supported
         return supported
     }
 }

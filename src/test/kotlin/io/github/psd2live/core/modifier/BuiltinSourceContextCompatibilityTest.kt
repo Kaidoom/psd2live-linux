@@ -28,6 +28,10 @@ class BuiltinSourceContextCompatibilityTest {
         val entry = store.install(directory.toString())
         val instance = RigModifierInstance("mouth", "mouth/fitted", 1, listOf(ModifierTarget("mesh", "mouth")), plugin = entry.reference)
         assertFalse(BuiltinSourceContextCompatibility.supportsMouthScaffold(instance, store))
+        assertFalse(BuiltinSourceContextCompatibility.supportsMouthRibbons(instance, store))
+        assertFalse(BuiltinSourceContextCompatibility.supportsChainLabels(instance, store))
         assertTrue(BuiltinSourceContextCompatibility.supportsMouthScaffold(instance.copy(plugin = artifact.reference), store))
+        assertTrue(BuiltinSourceContextCompatibility.supportsMouthRibbons(instance.copy(plugin = artifact.reference), store))
+        assertTrue(BuiltinSourceContextCompatibility.supportsChainLabels(instance.copy(plugin = artifact.reference), store))
     }
 }

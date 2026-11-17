@@ -40,7 +40,7 @@ class MouthOutlineAlgorithm : ReadingModifierAlgorithmPlugin {
                 checkpoint()
                 val mouth = target.fittedProvider?.let { provider ->
                     requireProvider(context, provider, "mouth/fitted", id)
-                    requireNotNull(fitted)
+                    requireNotNull(fitted).takeIf { fitsTarget(target, it) }
                 }
                 val turn = if (target.headOnMesh) {
                     val provider = requireNotNull(captured.head).provider
@@ -72,6 +72,21 @@ class MouthOutlineAlgorithm : ReadingModifierAlgorithmPlugin {
         return ModifierModelChanges(rasters = rasters)
     }
 
+    private fun fitsTarget(target: MouthOutlineInputs.Target, mouth: MouthRig): Boolean {
+        val left = mouth.fit.toCanvas(0f, 0f)
+        val right = mouth.fit.toCanvas(1f, mouth.fit.cornerV)
+        val fitCenterX = 0.5f * (left.first + right.first)
+        val fitCenterY = 0.5f * (left.second + right.second)
+        val fitWidth = mouth.fit.width.coerceAtLeast(1f)
+        val ap = target.aperture
+        val apCenterX = 0.5f * (ap.left + ap.right)
+        val apCenterY = 0.5f * (ap.top + ap.bottom)
+        val apWidth = (ap.right - ap.left).coerceAtLeast(1f)
+        return kotlin.math.abs(apCenterX - fitCenterX) <= 0.6f * fitWidth &&
+            kotlin.math.abs(apCenterY - fitCenterY) <= 0.6f * fitWidth &&
+            apWidth in (0.4f * fitWidth)..(2.2f * fitWidth)
+    }
+
     private fun requireProvider(context: ModifierAlgorithmContext, provider: String, type: String, id: String) {
         require(context.upstream.any { it.instanceId == provider && it.capability == type && ModifierTarget("mesh", id) in it.targets }) {
             "Missing outline $type provider for $id"
@@ -95,10 +110,10 @@ class MouthOutlineAlgorithm : ReadingModifierAlgorithmPlugin {
         }
         val geometry = if (mouth == null) legacy.ribbonGrid(stroke, target.frame, form, open, checkpoint)
         else {
-            val motion = MouthOutlineFittedMotion(columns, side, thickness, target.frame)
-            motion.geometry(mouth.keyed(form, open) { pose ->
-                MouthOutlineFittedMotion.PathPose(motion.sourcePath.map { (x, y) -> mouth.point(x, y, pose) })
-            }, checkpoint)
+            val grid = mouth.keyed(form, open) { pose ->
+                stroke.ribbonDelta(target.frame, positions) { upper, x, y -> mouth.strokeCenterPoint(upper, x, y, pose) }
+            }
+            KeyformGrid(grid.axes, grid.cells.map { cell -> KeyformCell(cell.coordinate, MeshDeltaForm(cell.form)) })
         }
         val name = if (side == 0) target.upperName else target.lowerName
         val id = instance.outputId("mouth-lip:${expected.id}:$side")
@@ -106,7 +121,7 @@ class MouthOutlineAlgorithm : ReadingModifierAlgorithmPlugin {
             geometryGrid = geometry, blendMode = BlendMode.Normal, texturePage = 0, atlasTileId = null,
             textureSourceId = null, drawOrder = (owner.drawOrder + 1f).coerceAtMost(1000f), blendShapes = emptyList())
         val mouthShapes = mouth?.shapes({ pose ->
-            stroke.delta(target.frame, positions) { x, y -> mouth.point(x, y, pose) }
+            stroke.ribbonDelta(target.frame, positions) { upper, x, y -> mouth.strokeCenterPoint(upper, x, y, pose) }
         }, visible = { if (it) 1f else Float.NaN }).orEmpty()
         val frame = target.frame
         val headShapes = turn?.shapes(stroke.positions(), Bounds(frame.left, frame.top, frame.right, frame.bottom),
