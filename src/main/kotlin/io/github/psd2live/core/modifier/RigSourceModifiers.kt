@@ -1963,6 +1963,7 @@ internal object RigSourceModifiers {
                 require("scaffold" in instance.config) { "Specify mouth's scaffold" }
                 val mode = instance.config["mode"]?.jsonPrimitive?.content ?: "fitted"
                 require(mode == "fitted" || mode == "legacy") { "Invalid mouth mode: $mode" }
+                io.github.psd2live.algorithms.binding.ClosedMouthVisibility.fromConfig(instance.config)
                 require(instance.targets.all { it.kind == "mesh" && source?.hasMesh(it.id) == true }) {
                     "Mouth targets must have captured source layers"
                 }
