@@ -31,7 +31,6 @@ class MouthVowelAlgorithm : ReadingModifierAlgorithmPlugin {
         val context = input.context
         val captured = MouthFittedInputs.decode(ModifierAlgorithmContext(context.values.getValue("source").jsonObject,
             context.resources, context.upstream))
-        require(captured.layers.values.none { it.tag == "MOUTH_CLOSE" }) { "Use mouth vowel v1 for closed-drawing swaps" }
         val vertices = requireNotNull(captured.sourceVertices)
         val raw = ScaffoldMeshContext.decodeRawMeshes(vertices.resource, checkpoint)
         val mouth = requireNotNull(captured.source).rig()
@@ -80,7 +79,8 @@ class MouthVowelAlgorithm : ReadingModifierAlgorithmPlugin {
             val shapes = if (follow == null) {
                 mouth.faceShapes(points, frame, captured.chin, false, ParameterId(open.id), null, lippedSkin = true)
             } else {
-                mouth.shapes(points, frame, false, { 1f },
+                val closed = layer.tag == "MOUTH_CLOSE"
+                mouth.shapes(points, frame, closed, { if (closed) 0f else 1f },
                     layer.tag == "TONGUE", MouthRig.Follow.valueOf(follow), chin = captured.chin)
             }
             val rest = { parameter: ParameterId -> if (parameter.raw in eyeOpen) 1f else 0f }

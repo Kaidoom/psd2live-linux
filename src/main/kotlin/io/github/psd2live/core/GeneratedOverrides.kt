@@ -61,6 +61,11 @@ data class GeneratedOverrideIssue(
  * edited by ordinary journal entries.
  *
  * Which generator owns a keyform comes from [DocumentGenerators]' graph.
+ *
+ * A sculpt at a new geometry stop also records `source_axes`: the axes present before the edit.
+ * Replay samples the missing cell (or seeds a new axis) on the generated mesh before merging the
+ * sculpt. These two steps form one override, so undo and regeneration cannot separate them.
+ * Older overrides without this field still require their original cell to exist.
  */
 internal object GeneratedOverrides {
 	const val OP = "generated_override"
@@ -114,15 +119,16 @@ internal object GeneratedOverrides {
 			val id = command.getValue("id").jsonPrimitive.content
 			val key = command.getValue("key").jsonObject.mapValues { it.value.jsonPrimitive.float }
 			val generator = owner(graph, model, kind, id, key, skins) ?: return@map command
+			val prepared = if (GeometryKeyforms.canPrepare(model, kind, id, key)) GeometryKeyforms.prepare(model, kind, id, key) else model
 			val (base, points) = when (kind) {
 				"warp" -> {
-					val cell = warpCell(model, id, key) ?: return@map command
+					val cell = warpCell(prepared, id, key) ?: return@map command
 					cell.form.controlPoints to (runCatching { CanvasGeometryJournal.points(model, command) }.getOrNull() ?: return@map command)
 				}
 				else -> {
-					val cell = meshCell(model, id, key) ?: return@map command
+					val cell = meshCell(prepared, id, key) ?: return@map command
 					// The mesh edit's points are where the vertices show; the offsets it keys are what the user made.
-					val edited = runCatching { CanvasEdits.apply(model, command) }.getOrNull()?.let { meshCell(it, id, key) } ?: return@map command
+					val edited = CanvasEdits.apply(prepared, command).let { meshCell(it, id, key) } ?: return@map command
 					cell.form.positionDeltas to edited.form.positionDeltas
 				}
 			}
@@ -131,6 +137,7 @@ internal object GeneratedOverrides {
 				put("key", JsonObject(key.mapValues { JsonPrimitive(it.value) }))
 				put("base", JsonArray(base.map(::JsonPrimitive)))
 				put("points", JsonArray(points.map(::JsonPrimitive)))
+				if (prepared !== model) put("source_axes", JsonArray(GeometryKeyforms.axes(model, kind, id).map { JsonPrimitive(it.parameterId.raw) }))
 			}
 		})
 	}
@@ -211,11 +218,13 @@ internal object GeneratedOverrides {
 			(if (kind == "mesh") skins.owner(DrawableId(id), ParameterId(parameter)) else null)
 				?: DocumentGenerators.owner(graph, DocumentGenerators.keyform(kind, id, parameter))?.id
 		fun key(command: JsonObject, field: String) = (command[field] as? JsonObject)?.mapValues { it.value.jsonPrimitive.float }.orEmpty()
-		fun override(generator: String, kind: String, id: String, key: Map<String, Float>, base: FloatArray, points: FloatArray) = buildJsonObject {
+		fun override(generator: String, kind: String, id: String, key: Map<String, Float>, base: FloatArray, points: FloatArray,
+                     materialize: Boolean = false) = buildJsonObject {
 			put("op", OP); put("generator", generator); put("target", "$kind:$id")
 			put("key", JsonObject(key.mapValues { JsonPrimitive(it.value) }))
 			put("base", JsonArray(base.map(::JsonPrimitive)))
 			put("points", JsonArray(points.map(::JsonPrimitive)))
+			if (materialize) put("source_axes", JsonArray(GeometryKeyforms.axes(shown, kind, id).map { JsonPrimitive(it.parameterId.raw) }))
 		}
 		fun cell(model: PuppetModel, kind: String, id: String, key: Map<String, Float>) =
 			if (kind == "warp") warpCell(model, id, key)?.form?.controlPoints else meshCell(model, id, key)?.form?.positionDeltas
@@ -251,8 +260,9 @@ internal object GeneratedOverrides {
 						val generator = owner(graph, shown, kind, id, key, skins) ?: return@let
 						val values = geometry[if (kind == "warp") "controlPoints" else "positionDeltas"]?.jsonArray?.map { it.jsonPrimitive.float }
 							?: return@let
-						val base = requireNotNull(cell(shown, kind, id, key)) { "$id has no keyform at $key" }
-						overrides += override(generator, kind, id, key, base, values.toFloatArray())
+						val prepared = if (GeometryKeyforms.canPrepare(shown, kind, id, key)) GeometryKeyforms.prepare(shown, kind, id, key) else shown
+						val base = requireNotNull(cell(prepared, kind, id, key)) { "$id has no editable geometry keyform at $key" }
+						overrides += override(generator, kind, id, key, base, values.toFloatArray(), materialize = prepared !== shown)
 						rest = JsonObject(rest - "geometry")
 					}
 					// Each channel of a generated cell becomes its own override; the user's other channels stay in the entry.
@@ -291,13 +301,16 @@ internal object GeneratedOverrides {
                     if (target == null) {
                         val provider = DocumentGenerators.owner(graph, "object:parameter:$parameter")
                             ?.takeIf { it.id.startsWith("modifier:") } ?: return@flatMap listOf(command)
-                        if (command["action"]?.jsonPrimitive?.content != "add") {
-                            val later = graph.order.drop(graph.order.indexOf(provider) + 1)
-                                .firstOrNull { node -> node.id.startsWith("modifier:") &&
-                                    node.writes.any { DocumentGenerators.writesParameterKey(it, parameter) } }
-                            require(later == null) { "$parameter has tracks in ${later?.id}; edit those tracks individually" }
-                        }
-                        return@flatMap listOf(JsonObject(command + ("generator" to JsonPrimitive(provider.id))))
+                        // Global key edits must see every track. Applying them at the parameter's
+                        // provider can invalidate the source grids that later modifiers still need.
+                        val contributors = listOf(provider) + graph.order.drop(graph.order.indexOf(provider) + 1)
+                            .filter { node -> node.id.startsWith("modifier:") &&
+                                node.writes.any { DocumentGenerators.writesParameterKey(it, parameter) } }
+                        val generator = contributors.last()
+                        val dependencies = if (contributors.size == 1) emptyMap() else mapOf(
+                            "providers" to JsonArray(contributors.dropLast(1).map { JsonPrimitive(it.id.removePrefix("modifier:")) }),
+                        )
+                        return@flatMap listOf(JsonObject(command + dependencies + ("generator" to JsonPrimitive(generator.id))))
                     }
 					val kind = targetKind(target) ?: return@flatMap listOf(command)
 					// A delete without a channel removes the key from geometry and every channel track; one naming a track only that.
@@ -441,7 +454,8 @@ internal object GeneratedOverrides {
 	 * Applies [command] to a generated [model]. A model without the generated cell (before the generators ran,
 	 * or after the generator was removed or reshaped) is left unchanged; the override then reports as orphaned.
 	 */
-	fun apply(model: PuppetModel, command: JsonObject): Outcome {
+	fun apply(original: PuppetModel, command: JsonObject): Outcome {
+		var model = original
 		val target = command.getValue("target").jsonPrimitive.content
 		val kind = target.substringBefore(':')
 		val id = target.substringAfter(':')
@@ -455,7 +469,14 @@ internal object GeneratedOverrides {
 			return applyChannel(model, kind, id, generator, target, key, channel, base, points)
 		}
 		require(base.size == points.size && points.size % 2 == 0 && points.all(Float::isFinite) && base.all(Float::isFinite)) { "Invalid override form" }
-		fun orphaned(reason: GeneratedOverrideOrphanReason) = Outcome(model, listOf(GeneratedOverrideIssue(GeneratedOverrideIssueKind.ORPHANED, generator, target, key, points.size / 2, points.size / 2, reason)))
+		fun orphaned(reason: GeneratedOverrideOrphanReason) = Outcome(original, listOf(GeneratedOverrideIssue(GeneratedOverrideIssueKind.ORPHANED, generator, target, key, points.size / 2, points.size / 2, reason)))
+		command["source_axes"]?.jsonArray?.let { sourceAxes ->
+			val existing = GeometryKeyforms.axes(model, kind, id).mapTo(HashSet()) { it.parameterId.raw }
+			if (sourceAxes.any { it.jsonPrimitive.content !in existing }) return orphaned(GeneratedOverrideOrphanReason.MISSING_KEYFORM)
+			model = runCatching { GeometryKeyforms.prepare(model, kind, id, key) }.getOrElse {
+				return orphaned(GeneratedOverrideOrphanReason.MISSING_KEYFORM)
+			}
+		}
 		val current = (if (kind == "warp") warpCell(model, id, key)?.form?.controlPoints else meshCell(model, id, key)?.form?.positionDeltas)
 			?: return orphaned(GeneratedOverrideOrphanReason.MISSING_KEYFORM)
 		if (current.size != points.size) return orphaned(GeneratedOverrideOrphanReason.SHAPE_MISMATCH)

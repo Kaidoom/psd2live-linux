@@ -8,9 +8,10 @@ import kotlin.math.abs
 /** Evaluator tolerance and first-key tie breaking are shared by gesture and agent preparation. */
 internal fun nearestKeyPose(axes: List<KeyformAxis>, pose: Map<ParameterId, Float>, defaults: Map<ParameterId, Float>): Map<ParameterId, Float> =
     buildMap {
-        for (axis in axes) {
-            val current = pose[axis.parameterId] ?: defaults[axis.parameterId] ?: continue
-            if (axis.keys.any { abs(it - current) < EPS_KEY }) continue
-            axis.keys.minByOrNull { abs(it - current) }?.let { put(axis.parameterId, it) }
+        for ((id, bound) in axes.groupBy { it.parameterId }) {
+            val current = pose[id] ?: defaults[id] ?: continue
+            val keys = bound.flatMap { it.keys.toList() }.distinct().sorted()
+            if (keys.any { abs(it - current) < EPS_KEY }) continue
+            keys.minByOrNull { abs(it - current) }?.let { put(id, it) }
         }
     }

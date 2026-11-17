@@ -31,7 +31,6 @@ class MouthCaptureAlgorithm : ReadingModifierAlgorithmPlugin {
         val context = input.context
         val captured = MouthFittedInputs.decode(ModifierAlgorithmContext(context.values.getValue("source").jsonObject,
             context.resources, context.upstream))
-        require(captured.layers.values.none { it.tag == "MOUTH_CLOSE" }) { "Use mouth capture v1 for closed-drawing swaps" }
         val vertices = requireNotNull(captured.sourceVertices)
         val raw = ScaffoldMeshContext.decodeRawMeshes(vertices.resource, checkpoint)
         val mouth = requireNotNull(captured.source).rig()
@@ -80,7 +79,10 @@ class MouthCaptureAlgorithm : ReadingModifierAlgorithmPlugin {
             }
             val follow = follows.getValue(id).jsonPrimitive.contentOrNull
             val role = follow?.let(MouthRig.Follow::valueOf)
+            val closed = layer.tag == "MOUTH_CLOSE"
             val grid = when {
+                // The closed drawing keeps its form-only grid; only the open drawing gains lip-press geometry.
+                closed -> drawable.geometryGrid
                 role != null -> mouth.grid(points, frame, mouthForm, mouthOpen, role, captured.chin)
                 id in lippedSkin -> mouth.faceGrid(points, frame, mouthForm, mouthOpen, captured.chin)
                 else -> drawable.geometryGrid
@@ -98,7 +100,7 @@ class MouthCaptureAlgorithm : ReadingModifierAlgorithmPlugin {
             val shapes = if (role == null) {
                 mouth.faceShapes(points, frame, captured.chin, layer.tag == "NOSE", mouthOpen, null, id in lippedSkin)
             } else {
-                mouth.shapes(points, frame, false, { opens -> if (opens) 1f else Float.NaN },
+                mouth.shapes(points, frame, closed, { opens -> if (!opens) Float.NaN else if (closed) 0f else 1f },
                     layer.tag == "TONGUE", role, chin = captured.chin)
             }
             val opacity = drawable.channelGrids.scalarAt(FormChannel.OPACITY, drawable.opacity, rest)

@@ -12,6 +12,9 @@ import kotlin.math.abs
 
 /** A point edit addresses exactly one owner/track/axis and preserves every other axis and track. */
 internal object ParameterKeyEdits {
+    internal fun pointValues(model: PuppetModel, id: ParameterId): List<Float> =
+        model.parameters.single { it.id == id }.keys ?: model.boundPointValues(id)
+
     fun apply(model: PuppetModel, edit: JsonObject): PuppetModel {
         if (edit["target"] == null) return applyParameterPoints(model, edit)
         val ref = RigAuthoringJournal.target(model, edit.getValue("target").jsonPrimitive.content)

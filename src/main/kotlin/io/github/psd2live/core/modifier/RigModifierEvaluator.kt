@@ -363,7 +363,11 @@ internal class RigModifierEvaluator(
                 if (physicsOrder.isEmpty()) output else output.copy(physics = output.physics.copy(
                     groups = io.github.psd2live.core.PhysicsCatalog.ordered(output.physics.groups, physicsOrder) { it.id }))
             }
-            require(overridden.parameterOverrides.keys.none { it in existing }) {
+            // A global key edit may live on the last track writer rather than the parameter's
+            // provider. It can change stops, but never another provider's range or definition.
+            require(overridden.parameterOverrides.all { (id, parameter) ->
+                existing[id]?.let { parameter.copy(keys = it.keys) == it } ?: true
+            }) {
                 "${instance.id} cannot override the range of a parameter provided upstream"
             }
             validateParameters(generated, current, instance, overridden.parameterOverrides)
@@ -378,7 +382,7 @@ internal class RigModifierEvaluator(
                 }
                 writers[key] = instance.id to definition
             }
-            val keyforms = io.github.psd2live.core.RigBuildProfile.stage("modifier keyform ownership") { ownedKeyforms(before, generated) }
+            val keyforms = io.github.psd2live.core.RigBuildProfile.stage("modifier keyform ownership") { ownedKeyforms(before, current) }
             entries += ModifierEvaluation(instance, ModifierStatus.ACTIVE, contributions = contributions,
                 ownedKeyforms = keyforms, overrideIssues = overridden.issues)
             available += instance.capability(definition.appliedConfig(instance), definition.provides)

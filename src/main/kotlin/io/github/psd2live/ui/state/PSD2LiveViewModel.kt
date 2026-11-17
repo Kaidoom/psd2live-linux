@@ -7029,7 +7029,7 @@ class PSD2LiveViewModel : AutoCloseable {
 	 */
 	fun snapToNearestKeys(kind: String, id: String, onReady: () -> Unit): Boolean {
 		val puppet = _state.value.previewModel?.rig?.puppet ?: return false
-		val axes = puppet.keyformAxesFor(kind, id)
+        val axes = io.github.psd2live.core.GeometryKeyforms.editingAxes(puppet, kind, id)
 		return snapAxesToNearestKeys(axes, onReady)
 	}
 
@@ -7037,7 +7037,7 @@ class PSD2LiveViewModel : AutoCloseable {
 	fun snapTargetsToNearestKeys(targets: List<Pair<String, String>>, onReady: () -> Unit): Boolean {
 		val puppet = _state.value.previewModel?.rig?.puppet ?: return false
 		if (targets.isEmpty()) return false
-		val axes = targets.flatMap { (kind, id) -> puppet.keyformAxesFor(kind, id) }
+        val axes = targets.flatMap { (kind, id) -> io.github.psd2live.core.GeometryKeyforms.editingAxes(puppet, kind, id) }
 			.distinctBy { it.parameterId to it.keys.contentHashCode() }
 		return snapAxesToNearestKeys(axes, onReady)
 	}
