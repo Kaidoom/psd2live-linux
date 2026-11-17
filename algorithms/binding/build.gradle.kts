@@ -112,6 +112,7 @@ private val bindingManifestSpecs = listOf(
     BindingManifestSpec("mouth-fitted", "mouth/fitted", "binding", "Fitted mouth", "mouth",
         provides = listOf("mouth/legacy"), exclusiveFamily = "base:mouth", writes = restPoseWrites, composableKinds = defaultComposable),
     BindingManifestSpec("hair-part", "hair", "part", "Hair", "hair",
+        requires = listOf("rig.scaffold", "body/legacy", "face/legacy"),
         provides = listOf("hair/chains", "hair/legacy"), exclusiveFamily = "base:hair",
         writes = physicsWrites,
         creates = listOf("parameters", "warpDeformers", "physicsGroups"),

@@ -141,6 +141,14 @@ class EyeSmileAlgorithm : ReadingModifierAlgorithmPlugin {
         val optionalUpstream = coupled + setOf(TYPE, "eye.wide")
         private val eyeParameterIds = listOf("ParamEyeLOpen", "ParamEyeROpen", "ParamEyeBallX", "ParamEyeBallY", "ParamEyeBallForm")
 
+        fun parameters(context: ModifierAlgorithmContext): List<Parameter> {
+            val captured = EyeSmileInputs.decode(context) {}
+            if (captured.art.layers.none { it.tag == "EYELASH" }) return emptyList()
+            val source = captured.measurements
+            val fits = EyeFitting.fit(captured.art, source.faceCenterX) { x, y -> source.alignment?.point(x, y) ?: (x to y) }.fits
+            return if (fits.isEmpty()) emptyList() else parameters(source.parameterNames)
+        }
+
         fun parameters(names: Map<String, String>) = listOf(Side.LEFT, Side.RIGHT).map {
             val id = EyeModules.smile(it).raw
             Parameter(id, names.getValue(id), 0f, 1f, 0f)

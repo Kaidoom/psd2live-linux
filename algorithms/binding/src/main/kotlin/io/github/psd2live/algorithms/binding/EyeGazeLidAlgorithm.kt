@@ -273,6 +273,18 @@ class EyeGazeLidAlgorithm : ReadingModifierAlgorithmPlugin {
                 put("carriers", JsonObject(carriers.mapValues { JsonPrimitive(it.value) }))
             }, source.resources)
 
+        fun parameters(context: ModifierAlgorithmContext): List<Parameter> {
+            val captured = EyeSmileInputs.decode(sourceContext(context)) {}
+            if (captured.art.layers.none { it.tag == "EYELASH" }) return emptyList()
+            val fitted = fits(captured) {}.keys
+            if (fitted.isEmpty()) return emptyList()
+            // Independent gaze rides additive lid/iris shapes; lawful lowering retypes each fitted side.
+            return parameters(captured.measurements.parameterNames).map { parameter ->
+                val side = if (parameter.id.startsWith("ParamEyeBallL")) Side.LEFT else Side.RIGHT
+                if (side !in fitted) parameter else parameter.copy(blend = true, keys = Floats.values(-1f, 0f, 1f))
+            }
+        }
+
         fun parameters(names: Map<String, String>) = listOf("LX", "LY", "RX", "RY").map {
             val id = "ParamEyeBall$it"
             Parameter(id, names.getValue(id), -1f, 1f, 0f)

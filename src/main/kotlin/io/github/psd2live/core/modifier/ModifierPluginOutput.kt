@@ -248,7 +248,9 @@ internal object ModifierPluginOutput {
         val approved = declaredParameters.associateBy { it.id }
         val existing = rig.parameters.mapTo(HashSet()) { it.id }
         output.parameters.filter { it.id !in existing && it.id in approved }.forEach {
-            require(it == approved.getValue(it.id)) { "Plugin changed captured shared parameter ${it.id}" }
+            require(it == approved.getValue(it.id)) {
+                "Plugin changed captured shared parameter ${it.id} in ${instance.id} (${instance.type}): expected=${approved.getValue(it.id)}, actual=$it"
+            }
         }
         val changes = RigModifierEvaluator.contributions(rig, output)
         require(changes.all { it.kind in algorithm.writes || "*" in algorithm.writes }) { "Plugin wrote undeclared object kinds" }
@@ -267,10 +269,14 @@ internal object ModifierPluginOutput {
         require(childOwners.map { it.id }.distinct().size == childOwners.size && childOwners.none { it.id == instance.id }) {
             "Part child output identities must be distinct"
         }
-        require(changes.filter { it.change == ModifierChange.ADDED && it.kind !in setOf("relations", "hierarchy") }.all {
+        val unowned = changes.filter { it.change == ModifierChange.ADDED && it.kind !in setOf("relations", "hierarchy") }.filterNot {
             instance.localOutputName(it.id) != null || childOwners.any { child -> child.localOutputName(it.id) != null } || it.kind == "parameter" && (algorithm.parameters.any { p -> p.id == it.id } || it.id in approved) ||
                 algorithm.derivedOutputs.any { rule -> rule.matches(instance, it.kind, it.id) }
-        }) { "Plugin outputs must use instance-owned deterministic IDs or declared shared parameters" }
+        }
+        require(unowned.isEmpty()) {
+            "Plugin outputs must use instance-owned deterministic IDs or declared shared parameters: ${instance.id} (${instance.type}): " +
+                unowned.joinToString { "${it.kind}:${it.id}" }
+        }
         return output
     }
 }

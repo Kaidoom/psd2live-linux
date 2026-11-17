@@ -166,6 +166,18 @@ internal object RigLegacyBindings {
                 io.github.psd2live.algorithms.binding.BrowShapeInputs.decode(requireNotNull(source).browShapeContext(instance)) {})
             spec.browSpring -> io.github.psd2live.algorithms.binding.BrowSpringAlgorithm.parameters(
                 io.github.psd2live.algorithms.binding.BrowSpringInputs.decode(requireNotNull(source).browSpringContext(instance)) {})
+            spec.module == RigModules.EYE_SMILE -> io.github.psd2live.algorithms.binding.EyeSmileAlgorithm.parameters(
+                requireNotNull(source).eyeSmileContext(instance))
+            spec.module == RigModules.EYE_EMOTION -> io.github.psd2live.algorithms.binding.EyeEmotionAlgorithm.parameters(
+                requireNotNull(source).eyeEmotionContext(instance))
+            spec.module == RigModules.EYE_GAZE_LID -> io.github.psd2live.algorithms.binding.EyeGazeLidAlgorithm.parameters(
+                requireNotNull(source).eyeGazeLidContext(instance))
+            spec.module == RigModules.EYE_AFTERSHOCK -> io.github.psd2live.algorithms.binding.EyeAftershockAlgorithm.parameters(
+                requireNotNull(source).eyeAftershockContext(instance))
+            spec.module == RigModules.BODY_BUST -> io.github.psd2live.algorithms.binding.BustBindingAlgorithm.parameters(
+                io.github.psd2live.algorithms.binding.BustBindingInputs.decode(requireNotNull(source).bustContext(instance)), instance)
+            spec.module == RigModules.BODY_ARMS -> io.github.psd2live.algorithms.binding.ArmSwingAlgorithm.parameters(
+                requireNotNull(source).armSwingContext(instance))
             spec.type == "eye.wide" -> {
                 val captured = io.github.psd2live.algorithms.binding.EyeWideInputs.decode(requireNotNull(source).eyeWideContext(instance)) {}
                 val align = { x: Float, y: Float -> captured.measurements.alignment?.point(x, y) ?: (x to y) }

@@ -29,7 +29,15 @@ internal object ModifierPluginCatalog {
                 fun native(instance: RigModifierInstance): RigModifierInstance {
                     // Reject only consumers of this exact package. An unused incompatible historical
                     // version must not prevent unrelated projects from constructing their registry.
-                    require(adapter.requires == algorithm.requires && adapter.exclusiveFamily == algorithm.exclusiveFamily &&
+                    // Hair 1.0.64 archives omitted two dependencies from their manifest. The host
+                    // already required them when those projects were saved. Keep the archived worker
+                    // and the host's stronger dependency checks; only tolerate this known metadata omission.
+                    val historicalHairRequirements = entry.reference.id == "builtin.68616972.v1" &&
+                        entry.reference.version == "1.0.64" && algorithm.type == "builtin.68616972.v1/part" &&
+                        algorithm.version == 1 && algorithm.aliases == setOf("hair") && adapter.type == "hair" &&
+                        algorithm.requires == setOf("rig.scaffold") &&
+                        adapter.requires == setOf("rig.scaffold", "body/legacy", "face/legacy")
+                    require((adapter.requires == algorithm.requires || historicalHairRequirements) && adapter.exclusiveFamily == algorithm.exclusiveFamily &&
                         adapter.composableKinds == algorithm.composableKinds && adapter.provides == algorithm.provides &&
                         (isBuiltin || adapter.changeWrites?.let { allowed -> algorithm.writes.all { it in allowed } } != false)) {
                         "Source adapter contract mismatch: $type (${entry.reference.id}@${entry.reference.version})"

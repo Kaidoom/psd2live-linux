@@ -1160,10 +1160,9 @@ internal class RigModifierSource(
         val (native, context) = RigFittedMouthModuleSource.context(this, scaffold, precedingWithFitted, activeModule = null, neutralScaffold = true)
         val targetLayers = instance.targets.mapNotNull { t -> layersByMesh[t.id]?.let { layersById[it] }?.let { t.id to it } }.toMap()
         val measured = RigFittedMouthModuleSource.measure(this, native, context, precedingWithFitted, targetLayers)
-        // Archived packages have a strict older input schema; retain their captured contract.
-        val pinned = instance.plugin
-        if (pinned != null && pinned.id.startsWith("builtin.") && BuiltinModifierPlugins.entry(pinned.id)?.reference != pinned)
-            return measured
+        // Preserve genuinely older schemas, but don't mistake another build of the same source-aware
+        // worker for an old algorithm merely because its payload digest differs from today's bundle.
+        if (!BuiltinSourceContextCompatibility.supportsMouthScaffold(instance)) return measured
         val ordinary = sourceScaffoldContext(scaffold)
         return ModifierAlgorithmContext(JsonObject(measured.values + mapOf(
             ModifierParameterI18n.CONTEXT_KEY to partParameterContext(instance, "fitted").values.getValue(ModifierParameterI18n.CONTEXT_KEY),
