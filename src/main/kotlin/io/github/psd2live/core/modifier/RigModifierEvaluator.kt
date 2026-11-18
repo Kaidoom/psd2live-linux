@@ -210,7 +210,7 @@ internal class RigModifierEvaluator(
             false
         }
         val reuse = saved?.stack?.instances?.zip(stack.instances)?.takeWhile { (a, b) ->
-            a == b && saved.stack.overrides[a.id].orEmpty() == stack.overrides[b.id].orEmpty() &&
+            (a.id in saved.stack.pendingWeightEdits) == (b.id in stack.pendingWeightEdits) && a == b && saved.stack.overrides[a.id].orEmpty() == stack.overrides[b.id].orEmpty() &&
                 saved.stack.appliedNodes[a.id] == stack.appliedNodes[b.id] &&
                 saved.stack.retryRevisions[a.id] == stack.retryRevisions[b.id] &&
                 saved.stack.initializationFailures[a.id] == stack.initializationFailures[b.id] &&
@@ -296,6 +296,9 @@ internal class RigModifierEvaluator(
                     }
                 } }
                 validateTargets(current, instance)
+                require(instance.id !in stack.pendingWeightEdits || instance.id in stack.appliedNodes) {
+                    "Simulation weights changed; use Bake to update the saved simulation"
+                }
                 RigBuildProfile.modifierStage("validation", instance.type) { definition.validate(current, instance) }
                 val declared = RigBuildProfile.modifierStage("parameters", instance.type) { definition.parameters(instance) }
                 require(declared.map { it.id }.distinct().size == declared.size) { "${instance.id} declares duplicate parameters" }
@@ -423,7 +426,9 @@ internal class RigModifierEvaluator(
                     }
                     writers[key] = instance.id to definition
                 }
-                val keyforms = io.github.psd2live.core.RigBuildProfile.stage("modifier keyform ownership") { ownedKeyforms(before, generated) }
+                val keyforms = io.github.psd2live.core.RigBuildProfile.stage("modifier keyform ownership") {
+                    ownedKeyforms(before, if (instance.type == ModifierAuthorEdits.TYPE && instance.id in stack.appliedNodes) current else generated)
+                }
                 val capability = stack.appliedNodes[instance.id]?.capability ?: instance.capability(definition.appliedConfig(instance), definition.provides)
                 entries += ModifierEvaluation(instance, ModifierStatus.ACTIVE, contributions = contributions,
                     ownedKeyforms = keyforms, overrideIssues = overridden.issues, algorithmWrites = algorithmWrites)
@@ -524,9 +529,7 @@ internal class RigModifierEvaluator(
         require(plan.getValue("can_apply").jsonPrimitive.boolean) {
             "Cannot apply modifiers: ${plan.getValue("blockers")}. Resolve missing dependencies or authored corrections first."
         }
-        val prefix = evaluate(authored, stack.copy(instances = stack.instances.take(end),
-            appliedNodes = stack.appliedNodes.filterKeys { owner -> stack.instances.take(end).any { it.id == owner } },
-            overrides = stack.overrides.filterKeys { owner -> owner in stack.retiredIds || stack.instances.take(end).any { it.id == owner } }), checkpoint = checkpoint)
+        val prefix = evaluate(authored, stack.prefix(end), checkpoint = checkpoint)
         require(prefix.entries.none { it.status in setOf(ModifierStatus.FAILED, ModifierStatus.MISSING_DEPENDENCY, ModifierStatus.MISSING_PLUGIN) }) { "Cannot apply a prefix with failed or missing dependencies or plugins" }
         require(prefix.entries.none { it.overrideIssues.any { issue -> issue.kind == io.github.psd2live.core.GeneratedOverrideIssueKind.ORPHANED } }) {
             "Cannot apply a prefix with overrides that no longer match their generated content"

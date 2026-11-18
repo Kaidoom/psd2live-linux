@@ -42,7 +42,7 @@ internal object WorkspaceCanvasWeightSchemas {
     }
     fun request(id: String): JsonObject = when (id) {
         "canvas_glue_edit" -> glue
-        "vertex_group_paint" -> obj(mapOf("edit" to weights), listOf("edit"))
+        "vertex_group_paint" -> obj(mapOf("edit" to weights, "auto_bake" to buildJsonObject { put("type", "boolean") }), listOf("edit"))
         else -> error("Unknown canvas weight operation: $id")
     }
 }
@@ -53,7 +53,7 @@ internal fun registerCanvasWeightOperations(registry: WorkspaceOperationRegistry
     val output = s.obj(s.identity + mapOf("applied" to s.constant(false), "changed" to s.array(s.handle(), 1, Int.MAX_VALUE)), s.identity.keys)
     val descriptions = mapOf(
         "canvas_glue_edit" to "Edit the canvas Glue seam using selected current vertex indices: brush extends its welds, remerge rebuilds selected welds (empty selections rebuild both outlines), unglue removes selected welds, and weights paints directional A/B or balanced pull by delta. Every continuous Glue record on the unordered mesh pair retains its own animation channels and order when weights or selected welds are removed. Welds are made where both meshes rest (the default pose, as Cubism's glue), so a weld does nothing at rest; index validation is against the captured candidate. Later atomic batch members see the edited topology.",
-        "vertex_group_paint" to "Paint or invert simulation vertex weights using the canvas algorithms. Targets are current mesh IDs. Brush points and radius use canvas pixels (X right, Y down) at pose; shape, falloff, angle and aspect match the UI tip. connected_only confines the reach to the mesh component under each segment. A stroke uses maximum coverage before add/subtract/set or four smoothing passes. Gradient reaches 1 at from and 0 at to. Omit name to edit the first group of kind or allocate its unique default name. invert skips meshes without that group. Groups remain editor metadata; their baked simulation affects exported models.")
+        "vertex_group_paint" to "Paint or invert simulation vertex weights using the canvas algorithms. Targets are current mesh IDs. Brush points and radius use canvas pixels (X right, Y down) at pose; shape, falloff, angle and aspect match the UI tip. connected_only confines the reach to the mesh component under each segment. A stroke uses maximum coverage before add/subtract/set or four smoothing passes. auto_bake defaults to false; weights persist immediately while saved simulations await explicit Bake. Gradient reaches 1 at from and 0 at to. Omit name to edit the first group of kind or allocate its unique default name. invert skips meshes without that group. Groups remain editor metadata; their baked simulation affects exported models.")
     for (id in WorkspaceCanvasWeightEdits.supported) {
         val business = WorkspaceCanvasWeightSchemas.request(id)
         val properties = business.getValue("properties").jsonObject + ("state" to s.handle())

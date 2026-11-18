@@ -34,7 +34,7 @@ internal object WorkspaceModifierSimulation {
         for (index in stack.instances.indices) {
             work.checkpoint()
             val instance = next.instances[index]
-            if (!instance.enabled || instance.type != "simulation" || instance.id in next.appliedNodes) continue
+            if (!instance.enabled || instance.type != "simulation" || instance.id in next.appliedNodes || instance.id in next.pendingWeightEdits) continue
             try {
             val source = RigSimEdit.fromJson(instance.config)
             require(source.enabled && source.targets == instance.targets.map { it.id } && instance.targets.all { it.kind == "mesh" }) {
@@ -42,7 +42,7 @@ internal object WorkspaceModifierSimulation {
             }
             // Only a captured, already evaluated prefix may skip rebuilding its simulation inputs.
             if (index < validatedPrefix && source.bake != null && instance.inputFingerprint != null) continue
-            val prefix = next.copy(instances = next.instances.take(index))
+            val prefix = next.prefix(index)
             val overlay = document.rigEdits.copy(modifierStack = prefix.toJson())
             work.progress(0f, "Evaluating simulation inputs: ${instance.id}")
             val model = pipeline.buildPreview(document.source, document.config().copy(rigEdits = overlay), previousAtlas = evaluated?.modifierAuthorAtlas ?: evaluated?.atlas)
@@ -92,7 +92,7 @@ internal object WorkspaceModifierSimulation {
     fun unchangedPrefix(before: RigModifierStack, after: RigModifierStack): Int {
         if (before.appliedCapabilities != after.appliedCapabilities) return 0
         return before.instances.zip(after.instances).takeWhile { (a, b) ->
-            a == b && before.overrides[a.id].orEmpty() == after.overrides[b.id].orEmpty() &&
+            (a.id in before.pendingWeightEdits) == (b.id in after.pendingWeightEdits) && a == b && before.overrides[a.id].orEmpty() == after.overrides[b.id].orEmpty() &&
                 before.appliedNodes[a.id] == after.appliedNodes[b.id] &&
                 before.retryRevisions[a.id] == after.retryRevisions[b.id]
         }.size

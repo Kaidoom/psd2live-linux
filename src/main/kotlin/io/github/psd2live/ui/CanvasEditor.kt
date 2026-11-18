@@ -5829,8 +5829,15 @@ internal class CanvasEditor(
                 val commands = io.github.psd2live.application.WorkspaceCanvasWeightEdits.commands(evaluated, operation)
                 evaluated = RigAuthoringJournal.compile(evaluated, commands).first
             }
+            val generation = state.projectOpenGeneration
             preview = evaluated; busy = true; error = null
-            viewModel.saveDocumentEdits(expected, "Edited canvas weights", operations) { failure ->
+            val submitted = operations.map { operation ->
+                if (operation.operation == "vertex_group_paint" && "auto_bake" !in operation.request)
+                    operation.copy(request = JsonObject(operation.request + ("auto_bake" to JsonPrimitive(viewModel.simulationAutoBake.value))))
+                else operation
+            }
+            viewModel.saveDocumentEdits(expected, "Edited canvas weights", submitted) { failure ->
+                if (state.projectOpenGeneration != generation) return@saveDocumentEdits
                 busy = false; preview = null; pending = null; gestureState = null; error = failure
                 endTransformBox()
             }

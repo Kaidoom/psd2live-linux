@@ -10,8 +10,15 @@ import org.umamo.runtime.model.*
 internal object WorkspaceCanvasWeightEdits {
     val supported = setOf("canvas_glue_edit", "vertex_group_paint")
 
-    fun apply(operation: WorkspaceDocumentOperation, document: WorkspaceDocument, model: RigPreviewModel): WorkspaceDocument =
-        WorkspaceDocumentEdits.journal(document, model, commands(model.rig.puppet, operation))
+    fun apply(operation: WorkspaceDocumentOperation, document: WorkspaceDocument, model: RigPreviewModel): WorkspaceDocument {
+        val next = WorkspaceDocumentEdits.journal(document, model, commands(model.rig.puppet, operation))
+        if (next == document || operation.request["auto_bake"]?.jsonPrimitive?.boolean != true) return next
+        val raw = next.rigEdits.modifierStack ?: return next
+        val stack = io.github.psd2live.core.modifier.RigModifierStack.fromJson(raw)
+        return next.copy(rigEdits = next.rigEdits.copy(modifierStack = stack.copy(pendingWeightEdits = emptySet(), instances = stack.instances.map {
+            if (it.type == "simulation") it.copy(config = JsonObject(it.config - "auto_bake")) else it
+        }).toJson()))
+    }
 
     fun commands(model: PuppetModel, operation: WorkspaceDocumentOperation): JsonArray {
         validateOperationSchema(operation.request, WorkspaceCanvasWeightSchemas.request(operation.operation))
