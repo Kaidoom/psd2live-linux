@@ -13,7 +13,7 @@ import java.awt.image.BufferedImage
  */
 data class WorkspacePaintRaster(val layerId: String, val raster: LayerRaster,
                                 val rebuildMesh: Boolean, val preserveSourceRaster: Boolean = false,
-                                val rect: LayerCanvasRect? = null) {
+                                val rect: LayerCanvasRect? = null, val coverVisible: Boolean = false) {
     init {
         require(raster.width > 0 && raster.height > 0 && raster.width.toLong() * raster.height <= 16_777_216)
         require(raster.rgba.size.toLong() == raster.width.toLong() * raster.height * 4)
@@ -80,14 +80,22 @@ internal object WorkspaceRasterEdits {
             ?: throw IllegalArgumentException("Layer not found: $layerId")
         val layer = document.source.layers.singleOrNull { it.id.raw == id && id !in document.deletedLayerIds }
             ?: throw IllegalArgumentException("Layer not found: $layerId")
+        // A live binding scaffold traces its own source geometry after ordinary journal edits.
+        // Refresh that input; a migration recorded against the evaluated mesh would replay before the scaffold.
+        if (WorkspaceGenerationEdits.hasLiveSourceMesh(model, id)) {
+            require((0 until layer.raster.width * layer.raster.height).any { (layer.raster.rgba[it * 4 + 3].toInt() and 255) > model.config.alphaThreshold }) {
+                "Layer $id has no visible pixels to mesh"
+            }
+            return WorkspaceGenerationEdits.refreshArtwork(document, setOf(id))
+        }
         // A layer sharing a material keeps the material's whole raster over its rectangle.
         if (WorkspaceMaterialLinks.shared(document, id) != null) return prepare(document, model, WorkspacePaintRaster(layerId, layer.raster,
-            rebuildMesh = true, rect = LayerSpace.of(layer).let { LayerCanvasRect(it.left, it.top, it.width, it.height) }), work)
+            rebuildMesh = true, coverVisible = true, rect = LayerSpace.of(layer).let { LayerCanvasRect(it.left, it.top, it.width, it.height) }), work)
         val own = PaintSpace.of(layer, document.source.widthPx, document.source.heightPx).cropLayer(layer, work::checkpoint)
         require((0 until own.raster.width * own.raster.height).any { (own.raster.rgba[it * 4 + 3].toInt() and 255) > model.config.alphaThreshold }) {
             "Layer $layerId has no visible pixels to mesh"
         }
-        return prepare(document, model, WorkspacePaintRaster(layerId, own.raster, rebuildMesh = true,
+        return prepare(document, model, WorkspacePaintRaster(layerId, own.raster, rebuildMesh = true, coverVisible = true,
             rect = own.rect ?: LayerCanvasRect.of(own.bounds)), work)
     }
 
@@ -140,13 +148,17 @@ internal object WorkspaceRasterEdits {
             document.config().copy(generationSource = document.generationSource ?: document.source))
         val prepared = RasterPaintCommit.prepare(pipeline, working, id, pixels, rebuild,
             request.preserveSourceRaster || samePixels, work::checkpoint,
-            ProgressListener { stage, fraction -> work.progress(0.35f + 0.45f * fraction.toFloat(), stage) }, runtimeBundle = false)
+            ProgressListener { stage, fraction -> work.progress(0.35f + 0.45f * fraction.toFloat(), stage) }, runtimeBundle = false, coverVisible = request.coverVisible)
         val beforeIds = model.rig.puppet.drawables.mapTo(HashSet()) { it.id }
         val migrations = if (!rebuild) emptyList() else prepared.rig.puppet.drawables.mapNotNull { drawable ->
             work.checkpoint()
-            val previous = model.rig.puppet.drawables.singleOrNull { it.id == drawable.id }?.mesh ?: return@mapNotNull null
+            val original = model.rig.puppet.drawables.singleOrNull { it.id == drawable.id } ?: return@mapNotNull null
+            val previous = original.mesh ?: return@mapNotNull null
             val replacement = drawable.mesh ?: return@mapNotNull null
-            if (previous.positions.contentEquals(replacement.positions) && previous.indices.contentEquals(replacement.indices)) null
+            if (previous.positions.contentEquals(replacement.positions) && previous.indices.contentEquals(replacement.indices) &&
+                (model.rig.ownLayerIdByDrawableId[drawable.id.raw] != id ||
+                    RasterMeshJournal.TextureCoordinates(model.rig.puppet, original).toCanvas(previous.uvs)
+                    .contentEquals(RasterMeshJournal.TextureCoordinates(prepared.rig.puppet, drawable).toCanvas(replacement.uvs)))) null
             else RasterMeshJournal.encode(model.rig.puppet, drawable.id, replacement, prepared.rig.puppet,
                 prepared.rig.sourceBoundsByDrawableId[drawable.id.raw])
         }

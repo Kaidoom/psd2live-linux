@@ -32,13 +32,18 @@ internal class WorkspaceTextureCommands(private val runtime: WorkspaceRuntime<Ri
         val summary = summary(resolved)
         val result = commands.executeCandidate(projectId, state, summary, author, taskId, mutation = { document, model ->
             WorkspaceMaterialLinks.reconcile(document,
-                WorkspaceTextureEdits.apply(document, model, resolved) { context.ensureActive() }).also {
+                WorkspaceTextureEdits.apply(document, model, resolved) { context.ensureActive() }).let { candidate ->
+                if (candidate !== document && edit is WorkspaceTextureEdit.ReplaceImage && (edit.fit == WorkspaceImageFit.ARTWORK || edit.rebuildMesh))
+                    WorkspaceArtworkRemesh.transfer(candidate, model) { context.ensureActive() } else candidate
+            }.also {
                 context.ensureActive(); progress?.progress(0.3f, "Rebuilding ${edit.operation}")
             }
         }, beforeCommit = { captured, document, model ->
             context.ensureActive(); progress?.progress(0.95f, "Committing ${edit.operation}")
             beforeCommit(captured, document, model)
         }, validate = { beforeDocument, beforeModel, afterDocument, afterModel ->
+            if (edit is WorkspaceTextureEdit.ReplaceImage && (edit.fit == WorkspaceImageFit.ARTWORK || edit.rebuildMesh))
+                WorkspaceGenerationEdits.validateRefresh(beforeModel, afterModel)
             // A moved tile or a new density lands on its spot or not at all.
             if (edit.operation in WorkspaceTextureEdits.placementEdits) WorkspaceTextureEdits.requireKept(beforeDocument, beforeModel, afterDocument, afterModel)
         })

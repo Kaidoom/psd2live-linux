@@ -51,6 +51,18 @@ internal object RasterMeshJournal {
         return Plan(replacement, sources, glueMap)
     }
 
+    /** Resample a parent-local offset field using the same vertex correspondence as the topology edit. */
+    fun remapOffsets(values: FloatArray, sources: List<VertexSource>): FloatArray =
+        FloatArray(sources.size * 2) { index ->
+            val axisIndex = index % 2
+            when (val source = sources[index / 2]) {
+                is VertexSource.FromOld -> values[source.oldIndex * 2 + axisIndex]
+                is VertexSource.BarycentricOf -> values[source.oldA * 2 + axisIndex] * source.wa +
+                    values[source.oldB * 2 + axisIndex] * source.wb + values[source.oldC * 2 + axisIndex] * source.wc
+                else -> error("Unsupported mesh vertex source")
+            }
+        }
+
     fun apply(model: PuppetModel, id: DrawableId, plan: Plan): PuppetModel {
         val drawable = requireNotNull(model.drawables.singleOrNull { it.id == id }) { "Mesh not found: ${id.raw}" }
         val original = requireNotNull(drawable.mesh)

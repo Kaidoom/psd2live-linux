@@ -1008,7 +1008,7 @@ object RigBuilder {
 		meshOuterMargin = config.meshOuterMargin, meshEdgeMode = config.meshEdgeMode, meshEdgeWidth = config.meshEdgeWidth,
 		meshMaxEdgeDistance = config.meshMaxEdgeDistance, meshInteriorDensity = config.meshInteriorDensity,
 		meshFillAlgorithm = config.meshFillAlgorithm, meshSuppressBoundaryDiagonals = config.meshSuppressBoundaryDiagonals,
-		meshFillParameters = config.meshFillParameters, meshUnits = config.meshUnits, meshTrace = config.meshTrace, meshWrap = config.meshWrap,
+		meshFillParameters = config.meshFillParameters, meshUnits = config.meshUnits, meshTrace = config.meshTrace, visiblePixelMeshLayers = config.visiblePixelMeshLayers, meshWrap = config.meshWrap,
 		alphaThreshold = config.alphaThreshold, headTurnStrength = config.headTurnStrength, bodyStrength = config.bodyStrength, rigTuning = config.rigTuning,
 		recipe = config.recipe,
 		meshOnly = config.meshOnly, generateDeformers = config.generateDeformers, featureDisplacementEnabled = config.featureDisplacementEnabled,
@@ -2532,7 +2532,7 @@ object RigBuilder {
 		val styledFace = (styledMesh || mountedOnFace) && context.faceTurn(config) != null
 		val styledTurn = if (styledMesh && styledFace) context.head to context.faceLandmarks(config) else null
 		val key = MeshKey(layer.meta(), layer.source.raster.width, layer.source.raster.height,
-			MeshResolution.input(layer.source, config.meshTrace, MeshResolution.unitScale(config, context.analysis.source)).key,
+			MeshResolution.input(layer.source, config, MeshResolution.unitScale(config, context.analysis.source)).key,
 			rigLayer.bounds, rigLayer.centroidX, rigLayer.centroidY, parentId, parentFrame, headSpace,
 			listOf(rigLayer.semantic, if (eyeGeometry) faceSignature(context.faceRig) else null, localEyes, localBrow, localMouth, context.headTurn(config)?.let {
 				listOf(faceSignature(context.faceRig), headShell(rigLayer), io.github.psd2live.core.recipe.RigModules.FACE_DEPTH_TURN.let { m ->
@@ -3497,7 +3497,7 @@ object RigBuilder {
 		val stages = stagesOf(cache) ?: return build()
 		// All consumers read these arrays as captured source geometry. Motion settings only affect the frame
 		// and whether the contour replaces the source boundary.
-		val key = listOf(layer, parent == null, frame, space, unitScale, meshSettings(layer, config), config.meshTrace,
+		val key = listOf(layer, parent == null, frame, space, unitScale, meshSettings(layer, config), config.meshTrace, layer.source.id.raw in config.visiblePixelMeshLayers,
 			config.alphaThreshold, contour, placement, page.width, page.height)
 		return stages.get("fitted mouth source mesh", 128, key, build)
 	}
@@ -3664,7 +3664,7 @@ object RigBuilder {
 		if (layer.semantic.tag in setOf(SemanticTag.TOOTH_T, SemanticTag.TOOTH_B)) {
 			return buildRectangularFallbackMesh(layer, parentFrame, headSpace, effectiveSpacing)
 		}
-		val adaptive = MeshResolution.mesh(MeshResolution.input(layer.source, config.meshTrace, unitScale), config.alphaThreshold, settings, meshCache)
+		val adaptive = MeshResolution.mesh(MeshResolution.input(layer.source, config, unitScale), config.alphaThreshold, settings, meshCache)
 		if (adaptive != null) {
 			val positions = FloatArray(adaptive.positions.size)
 			val canvas = FloatArray(adaptive.positions.size)

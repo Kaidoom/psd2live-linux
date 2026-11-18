@@ -185,6 +185,8 @@ data class PipelineConfig(
 	val meshUnits: MeshUnits = MeshUnits.DOCUMENT,
 	/** What mesh outlines are traced from; projects saved before it trace the canvas view. */
 	val meshTrace: MeshTrace = MeshTrace.TEXTURE,
+	/** Explicit pixel rebuilds include the feathered edge of these layers in their silhouette. */
+	val visiblePixelMeshLayers: Set<String> = emptySet(),
 	/** [MeshSettings.wrap] of every layer without an override; projects saved before it wrap nothing. */
 	val meshWrap: Float = 0f,
 	val alphaThreshold: Int = 8,

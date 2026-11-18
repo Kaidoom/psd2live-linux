@@ -67,9 +67,10 @@ object MeshResolution {
 	internal class Input(
 		val width: Int, val height: Int, val rgba: ByteArray, val unitScale: Float, val detail: Float,
 		private val scaleX: Float = 1f, private val scaleY: Float = 1f, private val offsetX: Float = 0f, private val offsetY: Float = 0f,
+		val coverVisible: Boolean = false,
 	) {
 		/** Everything the mapped mesh depends on besides the mesh settings and alpha threshold. */
-		val key: List<Any> get() = listOf(width, height, RasterDigest.of(rgba), unitScale, detail, scaleX, scaleY, offsetX, offsetY)
+		val key: List<Any> get() = listOf(width, height, RasterDigest.of(rgba), unitScale, detail, scaleX, scaleY, offsetX, offsetY, coverVisible)
 
 		fun toLayer(result: AdaptiveMeshGenerator.Result): AdaptiveMeshGenerator.Result {
 			if (scaleX == 1f && scaleY == 1f && offsetX == 0f && offsetY == 0f) return result
@@ -86,6 +87,19 @@ object MeshResolution {
 	 * canvas view; either is traced at [detail]. The texture is read laid over the layer's integer bounds
 	 * ([CanvasDensity.alignedRaster]), as a saved generation input holds it.
 	 */
+	internal fun input(layer: SourceLayer, config: PipelineConfig, unitScale: Float): Input {
+		if (layer.id.raw !in config.visiblePixelMeshLayers) return input(layer, config.meshTrace, unitScale)
+		val texture = layer.textureLayer
+		val raster = texture.raster
+		val space = LayerSpace.of(texture)
+		if (space.width <= 0 || space.height <= 0) return input(layer, config.meshTrace, unitScale)
+		val sx = raster.width / space.width
+		val sy = raster.height / space.height
+		val unit = unitScale * min(sx, sy)
+		return Input(raster.width, raster.height, raster.rgba, unit, detail(raster.width, raster.height, unit),
+			sx, sy, space.left - layer.bounds.left, space.top - layer.bounds.top, coverVisible = true)
+	}
+
 	internal fun input(layer: SourceLayer, trace: MeshTrace, unitScale: Float): Input {
 		// A dense layer handed in without its canvas view still meshes in canvas units.
 		val view = if (layer !is CanvasDensityLayer && CanvasDensity.dense(layer)) CanvasDensity.canvasLayer(layer) else layer
@@ -107,8 +121,8 @@ object MeshResolution {
 
 	/** The adaptive mesh of [input] in canvas units from the layer's integer bounds, through [cache] when there is one. */
 	internal fun mesh(input: Input, alphaThreshold: Int, settings: MeshSettings, cache: PreviewMeshCache?): AdaptiveMeshGenerator.Result? {
-		val result = if (cache != null) cache.generate(input.width, input.height, input.rgba, alphaThreshold, settings, input.unitScale, input.detail)
-			else AdaptiveMeshGenerator.generate(input.width, input.height, input.rgba, alphaThreshold, settings, input.unitScale, input.detail)
+		val result = if (cache != null) cache.generate(input.width, input.height, input.rgba, alphaThreshold, settings, input.unitScale, input.detail, input.coverVisible)
+			else AdaptiveMeshGenerator.generate(input.width, input.height, input.rgba, alphaThreshold, settings, input.unitScale, input.detail, input.coverVisible)
 		return result?.let(input::toLayer)
 	}
 

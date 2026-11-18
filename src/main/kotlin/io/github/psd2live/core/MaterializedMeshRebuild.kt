@@ -97,15 +97,7 @@ internal object MaterializedMeshRebuild {
                 require(previous.all { it.size == count * 2 }) { "Simulation bake has a stale mesh topology" }
                 return SimBakedAxis(axis.parameter, axis.keys, axis.offsets + (id to previous.map { values ->
                     checkpoint()
-                    FloatArray(sources.size * 2) { index ->
-                        val axisIndex = index % 2
-                        when (val source = sources[index / 2]) {
-                            is VertexSource.FromOld -> values[source.oldIndex * 2 + axisIndex]
-                            is VertexSource.BarycentricOf -> values[source.oldA * 2 + axisIndex] * source.wa +
-                                values[source.oldB * 2 + axisIndex] * source.wb + values[source.oldC * 2 + axisIndex] * source.wc
-                            else -> error("Unsupported mesh vertex source")
-                        }
-                    }
+                    RasterMeshJournal.remapOffsets(values, sources)
                 }))
             }
             sim.copy(bake = SimBakeResult.fromJson(bake.withGeometry(bake.vertexCounts + (id to sources.size), bake.statics.map(::migrate),

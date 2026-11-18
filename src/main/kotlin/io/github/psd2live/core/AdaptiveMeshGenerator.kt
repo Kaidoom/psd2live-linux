@@ -107,6 +107,7 @@ internal object AdaptiveMeshGenerator {
 		settings: MeshSettings,
 		unitScale: Float = 1f,
 		detail: Float = 1f,
+		coverVisible: Boolean = false,
 	): Result? = generate(
 		width = width,
 		height = height,
@@ -122,7 +123,7 @@ internal object AdaptiveMeshGenerator {
 		fillParameters = settings.fillParameters,
 		unitScale = unitScale,
 		detail = detail,
-		wrap = settings.wrap,
+		wrap = settings.wrap, coverVisible = coverVisible,
 	)
 
 	fun generate(
@@ -141,6 +142,7 @@ internal object AdaptiveMeshGenerator {
 		unitScale: Float = 1f,
 		detail: Float = 1f,
 		wrap: Float = 0f,
+		coverVisible: Boolean = false,
 	): Result? {
 		if (width <= 0 || height <= 0 || width.toLong() * height * 4 > rgba.size ||
 			!spacing.isFinite() || !interiorSpacing.isFinite() ||
@@ -154,12 +156,12 @@ internal object AdaptiveMeshGenerator {
 			val unit = unitScale.toDouble() / reduced.scale
 			return working(reduced.width, reduced.height, reduced.rgba, alphaThreshold, spacing * unit, interiorSpacing * unit,
 				outerMargin * unit, edgeMode, edgeWidth * unit, fillAlgorithm, suppressBoundaryDiagonals, fillParameters, unit,
-				MeshWrap.radius(wrap, unit))
+				MeshWrap.radius(wrap, unit), coverVisible)
 				?.scaledBy(reduced.scale)
 		}
 		val unit = if (traceDetail > 1f) max(1.0, unitScale.toDouble()) else 1.0
 		return working(width, height, rgba, alphaThreshold, spacing * unit, interiorSpacing * unit, outerMargin * unit,
-			edgeMode, edgeWidth * unit, fillAlgorithm, suppressBoundaryDiagonals, fillParameters, unit, MeshWrap.radius(wrap, unit))
+			edgeMode, edgeWidth * unit, fillAlgorithm, suppressBoundaryDiagonals, fillParameters, unit, MeshWrap.radius(wrap, unit), coverVisible)
 	}
 
 	/**
@@ -182,10 +184,14 @@ internal object AdaptiveMeshGenerator {
 		fillParameters: MeshFillParameters,
 		unit: Double,
 		wrapRadius: Double = 0.0,
+		coverVisible: Boolean = false,
+		exactBoundary: Boolean = false,
 	): Result? {
 		val threshold = alphaThreshold.coerceIn(1, 255)
 		val solidMask = RigBuildProfile.stage("mesh: alpha mask") {
-			AlphaEdgePreprocessor.geometryMask(width, height, rgba, threshold)
+			if (coverVisible) BinaryAlphaMask(width, height).also { mask ->
+				for (i in 0 until width * height) if ((rgba[i * 4 + 3].toInt() and 255) > alphaThreshold) mask.add(i % width, i / width)
+			} else AlphaEdgePreprocessor.geometryMask(width, height, rgba, threshold)
 		}
 		// Wrapping only adds to the traced mask, so whatever the source paints stays inside the mesh.
 		if (wrapRadius > 0.0) MeshWrap.close(solidMask, wrapRadius)
@@ -204,7 +210,7 @@ internal object AdaptiveMeshGenerator {
 		val largestIndex = areas.indices.maxByOrNull { areas[it] } ?: return null
 		val minimumSecondaryArea = max(6.0 * unit * unit, min(24.0 * unit * unit, areas[largestIndex] * 0.0002))
 		val outerContours = outerCandidates.filterIndexed { index, _ ->
-			index == largestIndex || areas[index] >= minimumSecondaryArea
+			coverVisible || index == largestIndex || areas[index] >= minimumSecondaryArea
 		}
 		if (outerContours.isEmpty()) return null
 
@@ -249,7 +255,7 @@ internal object AdaptiveMeshGenerator {
 			}
 			var guides = interleaved.map(EdgeBandBuilder::stations)
 			// A fitted loop must preserve the whole domain, not just be individually simple.
-			if (!validDomain(guides)) { guides = raw; interleaved = raw.map(EdgeBandBuilder::interleave) }
+			if (exactBoundary || !validDomain(guides)) { guides = raw; interleaved = raw.map(EdgeBandBuilder::interleave) }
 			Domain(raw, guides, interleaved)
 		}
 		// Independent Bezier fits can overshoot across a narrow gap between separate islands.
@@ -349,6 +355,16 @@ internal object AdaptiveMeshGenerator {
 			} else {
 				indices[index * 3 + 1] = triangle.c
 				indices[index * 3 + 2] = triangle.b
+			}
+		}
+		// Keep the fitted, sparse outline when it covers the visible texels. A soft edge or a tight
+		// bend can fall between fitted stations. Only that explicit pixel rebuild needs a closer trace.
+		if (coverVisible && !exactBoundary) {
+			val borders = globalBoundaryLoops.map { loop -> loop.map(globalPoints::get) }
+			val covered = io.github.psd2live.core.mesh.structure.TextureStructure.rasterize(borders, width, height, 1)
+			if (covered.indices.any { !covered[it] && (rgba[it * 4 + 3].toInt() and 255) > alphaThreshold }) {
+				return working(width, height, rgba, alphaThreshold, spacing, interiorSpacing, outerMargin, edgeMode, edgeWidth,
+					fillAlgorithm, suppressBoundaryDiagonals, fillParameters, unit, wrapRadius, coverVisible, exactBoundary = true)
 			}
 		}
 		return Result(positions, indices, globalBoundaryLoops, globalMiddleLoops, globalInnerLoops, globalSpines)

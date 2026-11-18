@@ -117,7 +117,7 @@ internal object RasterPaintCommit {
     fun prepare(pipeline: PSD2LivePipeline, currentPreview: RigPreviewModel, layerId: String,
                 pixels: PaintPixels, rebuildMesh: Boolean, preserveSourceRaster: Boolean = false,
                 checkpoint: () -> Unit = {}, progress: ProgressListener = ProgressListener { _, _ -> },
-                runtimeBundle: Boolean = true): RigPreviewModel {
+                runtimeBundle: Boolean = true, coverVisible: Boolean = false): RigPreviewModel {
         progress.update("Cropping painted source", 0.0)
         val painted = paintedSource(currentPreview, layerId, pixels, preserveSourceRaster, checkpoint)
         val newBounds = painted.bounds
@@ -286,7 +286,8 @@ internal object RasterPaintCommit {
                         placement = targetPlacement,
                         pageWidth = targetPageWidth,
                         pageHeight = targetPageHeight,
-                        config = currentPreview.config,
+                        config = if (coverVisible) currentPreview.config.copy(visiblePixelMeshLayers =
+                            currentPreview.config.visiblePixelMeshLayers + targetClassifiedLayer.source.id.raw) else currentPreview.config,
                         parentId = drawable.parentDeformerId,
                         owner = drawable,
                         atlas = newAtlas,

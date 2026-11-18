@@ -30,13 +30,11 @@ internal object WorkspaceGenerationEdits {
         }
         if (pending.isEmpty() && generation.pendingClassifications.isEmpty() && refreshed.isEmpty()) return document
         // Absent from the frozen generation input, a layer generates from its current pixels.
-        val drop = pending + refreshed
-        val seeded = seeded(document, model)
+        val seeded = refreshArtwork(seeded(document, model), refreshed)
         return seeded.copy(
-            rigEdits = seeded.rigEdits.let { it.copy(authoringJournal = it.authoringJournal + RigMeshSeed.refresh(refreshed)) },
             layerOverrides = document.layerOverrides + generation.pendingClassifications,
-            generationSource = document.generationSource?.without(drop),
-            meshSource = document.meshSource?.without(drop),
+            generationSource = seeded.generationSource?.without(pending),
+            meshSource = seeded.meshSource?.without(pending),
             layout = layout.copy(generation = generation.copy(pendingLayerIds = emptySet(), pendingClassifications = emptyMap(),
                 refreshLayerIds = generation.refreshLayerIds - refreshed)),
         )
@@ -52,15 +50,14 @@ internal object WorkspaceGenerationEdits {
             require(document.source.layers.any { it.id.raw == id } && id !in document.deletedLayerIds) { "Layer not found: $id" }
             require(id !in pending && id !in document.layout.referenceLayerIds) { "Layer $id has not been generated yet" }
         }
-        val seed = seeded(document, model)
+        val seed = refreshArtwork(seeded(document, model), refreshed)
         val pins = model.stableLayerIdByDrawableId.entries.groupBy({ it.value }, { it.key })
             .filterValues { it.size == 1 }.mapValues { it.value.single() }
         val candidate = seed.copy(
-            rigEdits = seed.rigEdits.copy(splitDrawableIds = pins + seed.rigEdits.splitDrawableIds,
-                authoringJournal = seed.rigEdits.authoringJournal + RigMeshSeed.refresh(refreshed)),
+            rigEdits = seed.rigEdits.copy(splitDrawableIds = pins + seed.rigEdits.splitDrawableIds),
             layerOverrides = seed.layerOverrides + generation.pendingClassifications,
-            generationSource = seed.generationSource?.without(pending + refreshed),
-            meshSource = seed.meshSource?.without(pending + refreshed),
+            generationSource = seed.generationSource?.without(pending),
+            meshSource = seed.meshSource?.without(pending),
             layout = seed.layout.copy(generation = WorkspaceGeneration.Generated.copy(
                 refreshLayerIds = generation.refreshLayerIds - refreshed)),
         )
@@ -80,6 +77,43 @@ internal object WorkspaceGenerationEdits {
             putJsonArray("targets") { targets.forEach { addJsonObject { put("kind", "mesh"); put("id", it.id.raw) } } }
         }).first
         return candidate.copy(rigEdits = candidate.rigEdits.copy(modifierStack = next.toJson()))
+    }
+
+    fun hasLiveSourceMesh(model: RigPreviewModel, layerId: String): Boolean {
+        val evaluation = model.modifierEvaluation ?: return false
+        val ids = model.rig.ownLayerIdByDrawableId.filterValues { it == layerId }.keys
+        return evaluation.entries.any { entry ->
+            entry.status == ModifierStatus.ACTIVE && entry.instance.type == RigSourceModifiers.SCAFFOLD &&
+                entry.instance.id !in evaluation.stack.appliedNodes &&
+                entry.instance.targets.any { it.id in ids }
+        }
+    }
+
+    /** Refresh only these source layers, without generating other pending layers or changing preset selection. */
+    fun refreshArtwork(document: WorkspaceDocument, layers: Set<String>): WorkspaceDocument {
+        if (layers.isEmpty()) return document
+        val visible = document.config().visiblePixelMeshLayers + layers
+        val seeds = layers.intersect(RigMeshSeed.layers(document.rigEdits).keys)
+        return document.copy(
+            settings = JsonObject(document.settings + ("visiblePixelMeshLayers" to JsonArray(visible.sorted().map(::JsonPrimitive)))),
+            generationSource = document.generationSource?.without(layers), meshSource = document.meshSource?.without(layers),
+            rigEdits = document.rigEdits.copy(authoringJournal = document.rigEdits.authoringJournal + RigMeshSeed.refresh(seeds)),
+            layout = document.layout.copy(generation = document.layout.generation.copy(
+                refreshLayerIds = document.layout.generation.refreshLayerIds - layers)),
+        )
+    }
+
+    /** A failed live modifier or a newly orphaned sculpt would otherwise be silently omitted from the preview. */
+    fun validateRefresh(before: RigPreviewModel, after: RigPreviewModel) {
+        val previous = before.modifierEvaluation?.entries?.associateBy { it.instance.id }.orEmpty()
+        for (entry in after.modifierEvaluation?.entries.orEmpty()) {
+            val old = previous[entry.instance.id] ?: continue
+            if (old.status == ModifierStatus.ACTIVE) require(entry.status == ModifierStatus.ACTIVE) {
+                "Cannot adapt the artwork while preserving ${entry.instance.type} (${entry.instance.id}): ${entry.error ?: entry.missingDependencies}. Keep the existing mesh or adjust the modifier first."
+            }
+            val lost = (entry.overrideIssues - old.overrideIssues.toSet()).firstOrNull()
+            require(lost == null) { "Cannot adapt the artwork while preserving ${lost?.target} at ${lost?.key}. Keep the existing mesh or adjust that pose first." }
+        }
     }
 
     private fun seeded(document: WorkspaceDocument, model: RigPreviewModel): WorkspaceDocument {

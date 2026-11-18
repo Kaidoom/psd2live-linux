@@ -16,8 +16,8 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import io.github.psd2live.core.legacy.RigGenerationFrames
 
-/** How a replacement raster of another aspect ratio lies on the layer's unchanged canvas rectangle. */
-enum class WorkspaceImageFit { STRETCH, CONTAIN }
+/** Placement of a replacement raster in the source layer’s coordinate system. */
+enum class WorkspaceImageFit { STRETCH, CONTAIN, ARTWORK }
 
 /** Where a replacement image comes from. A file is read only by the single command, after its state check. */
 sealed interface WorkspaceTextureImage {
@@ -403,24 +403,25 @@ internal object WorkspaceTextureEdits {
      */
     fun apply(document: WorkspaceDocument, model: RigPreviewModel, edit: WorkspaceTextureEdit, checkCancelled: () -> Unit = {}): WorkspaceDocument {
         checkCancelled()
-        if (edit is WorkspaceTextureEdit.ReplaceImage && edit.image is WorkspaceTextureImage.Material) {
-            val item = document.layout.materials.item(edit.image.id) ?: throw IllegalArgumentException("Material not found: ${edit.image.id}")
-            val replaced = apply(document, model, edit.copy(image = WorkspaceTextureImage.Raster(item.raster)), checkCancelled)
-            return replaced.copy(layout = replaced.layout.copy(layerMaterials = replaced.layout.layerMaterials + (edit.layerId to item.id)))
+        when (edit) {
+            is WorkspaceTextureEdit.SetCanvasRect -> return canvasRect(document, model, edit)
+            is WorkspaceTextureEdit.ReplaceImage -> Unit
+            is WorkspaceTextureEdit.SetPixelDensity -> return density(document, model, edit)
+            is WorkspaceTextureEdit.SetTile -> return tile(document, model, edit)
+            is WorkspaceTextureEdit.SetBudget -> return budget(document, model, edit)
+            is WorkspaceTextureEdit.Pack -> return pack(document, model, edit)
         }
-        val edited = applyGenerated(document, model, edit, checkCancelled)
-        return if (edit is WorkspaceTextureEdit.ReplaceImage && edited !== document) WorkspaceGenerationEdits.replacedGenerated(edited, edit.layerId) else edited
-    }
-
-    private fun applyGenerated(document: WorkspaceDocument, model: RigPreviewModel, edit: WorkspaceTextureEdit, checkCancelled: () -> Unit): WorkspaceDocument {
-        return when (edit) {
-            is WorkspaceTextureEdit.SetCanvasRect -> canvasRect(document, model, edit)
-            is WorkspaceTextureEdit.ReplaceImage -> replace(document, model, edit, checkCancelled)
-            is WorkspaceTextureEdit.SetPixelDensity -> density(document, model, edit)
-            is WorkspaceTextureEdit.SetTile -> tile(document, model, edit)
-            is WorkspaceTextureEdit.SetBudget -> budget(document, model, edit)
-            is WorkspaceTextureEdit.Pack -> pack(document, model, edit)
+        val item = (edit.image as? WorkspaceTextureImage.Material)?.let { material ->
+            requireNotNull(document.layout.materials.item(material.id)) { "Material not found: ${material.id}" }
         }
+        val decoded = if (item == null) edit else edit.copy(image = WorkspaceTextureImage.Raster(item.raster))
+        val placement = item?.takeIf { edit.fit == WorkspaceImageFit.ARTWORK }?.let {
+            artworkPlacement(document, sourceLayer(document, edit.layerId), it)
+        }
+        val replaced = replace(document, model, decoded, checkCancelled, placement)
+        val staged = if (replaced === document || decoded.rebuildMesh) replaced else WorkspaceGenerationEdits.replacedGenerated(replaced, edit.layerId)
+        return if (item == null || staged.layout.layerMaterials[edit.layerId] == item.id) staged else
+            staged.copy(layout = staged.layout.copy(layerMaterials = staged.layout.layerMaterials + (edit.layerId to item.id)))
     }
 
     /**
@@ -494,17 +495,52 @@ internal object WorkspaceTextureEdits {
         })
     }
 
+    /** PSD-authored layers use the PSD coordinate system. A separately placed instance retains its local placement. */
+    internal fun artworkPlacement(document: WorkspaceDocument, layer: SourceLayer, incoming: MaterialItem): LayerCanvasRect {
+        val old = document.layout.layerMaterials[layer.id.raw]?.let(document.layout.materials::item)
+        val frame = layer.canvasRect()
+        val place = incoming.placement
+        val sameSourceLayer = (incoming.sourceLayerId ?: incoming.origin.substringAfter('#', "")) == layer.id.raw &&
+            (layer as? WorkspaceSourceMetadata)?.derived != true && old != null &&
+            old.origin.substringBefore('#') == incoming.origin.substringBefore('#') &&
+            (incoming.sourceLayerPath?.lastOrNull() ?: incoming.name) == layer.name
+        if (place != null && sameSourceLayer && incoming.placementWidth > 0 && incoming.placementHeight > 0) {
+            return WorkspaceMaterialEdits.fittedPlacement(incoming.placementWidth.toFloat(), incoming.placementHeight.toFloat(),
+                document.source.widthPx.toFloat(), document.source.heightPx.toFloat(), place)
+        }
+        val before = old?.placement
+        if (place != null && before != null && old.id == incoming.id && before.width > 0f && before.height > 0f &&
+            old.placementWidth == incoming.placementWidth && old.placementHeight == incoming.placementHeight) {
+            val sx = frame.width / before.width
+            val sy = frame.height / before.height
+            return LayerCanvasRect(frame.left + (place.left - before.left) * sx, frame.top + (place.top - before.top) * sy,
+                place.width * sx, place.height * sy)
+        }
+        return centeredArtwork(frame, layer.raster, incoming.raster)
+    }
+
+    private fun centeredArtwork(frame: LayerCanvasRect, old: LayerRaster, incoming: LayerRaster): LayerCanvasRect {
+        val scale = minOf(frame.width / old.width, frame.height / old.height)
+        val width = incoming.width * scale
+        val height = incoming.height * scale
+        return LayerCanvasRect(frame.left + (frame.width - width) / 2, frame.top + (frame.height - height) / 2, width, height)
+    }
+
     private fun replace(document: WorkspaceDocument, model: RigPreviewModel, edit: WorkspaceTextureEdit.ReplaceImage,
-                        checkCancelled: () -> Unit): WorkspaceDocument {
+                        checkCancelled: () -> Unit, placement: LayerCanvasRect? = null): WorkspaceDocument {
         val layer = sourceLayer(document, edit.layerId)
         val raster = raster(edit.image, checkCancelled)
         checkCancelled()
         val fit = if (edit.fit == WorkspaceImageFit.CONTAIN) LayerImageReplace.Fit.CONTAIN else LayerImageReplace.Fit.STRETCH
-        val replaced = LayerImageReplace.replace(document, edit.layerId, raster, fit)
+        val rect = placement ?: if (edit.fit == WorkspaceImageFit.ARTWORK) centeredArtwork(layer.canvasRect(), layer.raster, raster) else null
+        val replaced = LayerImageReplace.replace(document, edit.layerId, raster, fit, rect)
         val laid = replaced.source.layers.single { it.id.raw == edit.layerId }
-        val samePixels = laid.raster.width == layer.raster.width && laid.raster.height == layer.raster.height &&
+        val samePixels = laid.canvasRect() == layer.canvasRect() && laid.raster.width == layer.raster.width && laid.raster.height == layer.raster.height &&
             laid.raster.rgba.contentEquals(layer.raster.rgba)
-        if (!edit.rebuildMesh) return if (samePixels) document else replaced
+        if (samePixels && !edit.rebuildMesh) return document
+        if (edit.rebuildMesh && WorkspaceGenerationEdits.hasLiveSourceMesh(model, edit.layerId))
+            return WorkspaceGenerationEdits.refreshArtwork(replaced, setOf(edit.layerId))
+        if (!edit.rebuildMesh) return replaced
         requireUnbound(document, model, edit.layerId, "Rebuilding the mesh of a replaced layer")
         // The new pixels also become this layer's generation input; other layers keep theirs.
         val generation = document.generationSource?.let { swap(it, edit.layerId) { laid } }

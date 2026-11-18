@@ -51,7 +51,7 @@ internal fun MaterialReimportDialog(prompt: MaterialReimportPrompt, decide: (Mat
                 plan.issues.forEach { issue -> issue.suggested?.let { put(issue.index, it) } }
             } }
             var fit by remember(prompt) { mutableStateOf(false) }
-            val valid = runCatching { plan.resolve(choices, fit) }.isSuccess
+            val valid = runCatching { plan.resolve(choices, fit, !fit) }.isSuccess
             val needsFit = choices.any { (index, id) -> plan.items.find { it.id == id }?.let {
                 id in plan.used && WorkspaceMaterialReimport.changedBounds(it, plan.entries[index])
             } == true }
@@ -96,7 +96,7 @@ internal fun MaterialReimportDialog(prompt: MaterialReimportPrompt, decide: (Mat
                 }
                 if (needsFit) {
                     CompactCheckbox(fit, { fit = it }, label = tr("materials.reimport.fit"))
-                    ModalMessage(tr("materials.reimport.fitHint"), color = colors.warning)
+                    ModalMessage(if (fit) tr("materials.reimport.fitHint") else tr("materials.reimport.adaptHint"))
                 }
                 ModalMessage(tr("materials.reimport.keepMissing"))
             }

@@ -246,10 +246,13 @@ internal class MaterialController(
                     else askReimport(MaterialReimportPrompt.Layers(filename, plan, library)) as MaterialReimportDecision.Layers
                 val fields = buildJsonObject {
                     if (plan != null) {
-                        val resolved = plan.resolve(decision.choices, decision.fitChangedBounds)
+                        val resolved = plan.resolve(decision.choices, decision.fitChangedBounds, !decision.fitChangedBounds)
                         put("folder_id", target)
                         put("choices", JsonObject(decision.choices.mapKeys { it.key.toString() }.mapValues { JsonPrimitive(it.value) }))
                         put("fit_changed_bounds", decision.fitChangedBounds)
+                        if (!decision.fitChangedBounds && resolved.any { (index, id) -> id in used && library.item(id)?.let {
+                                io.github.psd2live.application.WorkspaceMaterialReimport.changedBounds(it, plan.entries[index]) } == true })
+                            put("adapt_changed_bounds", true)
                         updated += plan.updated(resolved)
                         added += resolved.values.count { it == io.github.psd2live.application.WorkspaceMaterialReimport.NEW }
                         skipped += resolved.values.count { it == io.github.psd2live.application.WorkspaceMaterialReimport.SKIP }
@@ -316,9 +319,13 @@ internal class MaterialController(
 		tr(if (reference) "materials.referenceMarked" else "materials.referenceUnmarked"), io.github.psd2live.application.WorkspaceMaterialEdits.MARK_REFERENCE,
 		kotlinx.serialization.json.buildJsonObject { put("ids", strings(ids)); put("reference", reference) })
 
-	/** Layer [layerId] shows material [materialId] over its unchanged rectangle: `layer_replace_image` with the material. */
+	/** Layer [layerId] shows material [materialId] at its artwork size, retaining the layer identity and rig. */
 	fun replaceLayerWithMaterial(layerId: String, materialId: String) = layoutEdit(tr("materials.replaced"), "layer_replace_image",
-		kotlinx.serialization.json.buildJsonObject { put("layer_id", layerId); put("material_id", materialId) })
+		kotlinx.serialization.json.buildJsonObject {
+			put("layer_id", layerId); put("material_id", materialId); put("fit", "artwork")
+			if (state().previewModel?.let { io.github.psd2live.application.WorkspaceGenerationEdits.hasLiveSourceMesh(it, layerId) } == true)
+				put("rebuild_mesh", true)
+		})
 
 	private val _materialEditor = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 

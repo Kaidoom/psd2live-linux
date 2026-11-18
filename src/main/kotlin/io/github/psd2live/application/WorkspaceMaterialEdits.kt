@@ -352,14 +352,6 @@ internal object WorkspaceMaterialEdits {
         }
         require(items.isNotEmpty()) { "The folder holds no material: $materialId" }
         val width = document.source.widthPx.toFloat(); val height = document.source.heightPx.toFloat()
-        // A PSD layer keeps its place in the PSD, the PSD's canvas centred on this one and shrunk to fit it: the
-        // same place when both canvases are one size. A place on a canvas of unknown size is centred as a whole.
-        fun fitted(cw: Float, ch: Float, r: LayerCanvasRect): LayerCanvasRect {
-            if (cw == width && ch == height) return r
-            val scale = minOf(1f, width / cw, height / ch)
-            val dx = (width - cw * scale) / 2f; val dy = (height - ch * scale) / 2f
-            return LayerCanvasRect(dx + r.left * scale, dy + r.top * scale, r.width * scale, r.height * scale)
-        }
         val unknown = items.mapNotNull { item -> item.placement?.takeIf { item.placementWidth <= 0 || item.placementHeight <= 0 } }
         val unknownSpan = if (unknown.isEmpty()) null else LayerCanvasRect(unknown.minOf { it.left }, unknown.minOf { it.top },
             unknown.maxOf { it.right } - unknown.minOf { it.left }, unknown.maxOf { it.bottom } - unknown.minOf { it.top })
@@ -369,10 +361,10 @@ internal object WorkspaceMaterialEdits {
                 val w = item.raster.width * scale; val h = item.raster.height * scale
                 return LayerCanvasRect((width - w) / 2f, (height - h) / 2f, w, h)
             }
-            if (item.placementWidth > 0 && item.placementHeight > 0) return fitted(item.placementWidth.toFloat(), item.placementHeight.toFloat(), place)
+            if (item.placementWidth > 0 && item.placementHeight > 0) return fittedPlacement(item.placementWidth.toFloat(), item.placementHeight.toFloat(), width, height, place)
             val span = requireNotNull(unknownSpan)
             val shifted = LayerCanvasRect(place.left - span.left, place.top - span.top, place.width, place.height)
-            return fitted(span.width, span.height, shifted)
+            return fittedPlacement(span.width, span.height, width, height, shifted)
         }
         val placements = items.associateWith { if (rect != null) rect else natural(it) }.toMutableMap()
         if (at != null && rect == null) {
@@ -534,6 +526,15 @@ internal object WorkspaceMaterialEdits {
         val cropped = MaterialItem(itemId, itemName, folder, MaterialKind.BITMAP, raster, placement, tags = item.tags,
             origin = "crop:$id#$left,$top,$w,$h", placementWidth = if (placement != null) canvasW else 0, placementHeight = if (placement != null) canvasH else 0)
         return document.withLibrary(library.copy(items = library.items + cropped))
+    }
+
+    /** Centre the PSD canvas in the document and scale it down uniformly only when it exceeds the document. */
+    fun fittedPlacement(sourceWidth: Float, sourceHeight: Float, width: Float, height: Float, r: LayerCanvasRect): LayerCanvasRect {
+        if (sourceWidth == width && sourceHeight == height) return r
+        val scale = minOf(1f, width / sourceWidth, height / sourceHeight)
+        val dx = (width - sourceWidth * scale) / 2f
+        val dy = (height - sourceHeight * scale) / 2f
+        return LayerCanvasRect(dx + r.left * scale, dy + r.top * scale, r.width * scale, r.height * scale)
     }
 
     /** The integer bounds enclosing [rect]. */

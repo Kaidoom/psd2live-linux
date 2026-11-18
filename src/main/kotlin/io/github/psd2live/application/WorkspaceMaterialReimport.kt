@@ -1,5 +1,6 @@
 package io.github.psd2live.application
 
+import io.github.psd2live.core.LayerImageReplace
 import io.github.psd2live.core.RigPreviewModel
 import io.github.psd2live.project.*
 import kotlinx.serialization.json.*
@@ -20,7 +21,7 @@ internal object WorkspaceMaterialReimport {
         val issues: List<Issue>,
         val used: Set<String>,
     ) {
-        fun resolve(choices: Map<Int, String>, fitChangedBounds: Boolean): Map<Int, String> {
+        fun resolve(choices: Map<Int, String>, fitChangedBounds: Boolean, adaptChangedBounds: Boolean = false): Map<Int, String> {
             require(choices.keys.all { it in entries.indices }) { "Reimport contains an unknown layer choice" }
             val resolved = automatic.toMutableMap()
             for (issue in issues) resolved[issue.index] = requireNotNull(choices[issue.index]) {
@@ -35,8 +36,8 @@ internal object WorkspaceMaterialReimport {
             for ((index, target) in resolved) {
                 if (target == NEW || target == SKIP) continue
                 val item = requireNotNull(byId[target]) { "Replacement material is outside the selected PSD folder: $target" }
-                require(fitChangedBounds || item.id !in used || !changedBounds(item, entries[index])) {
-                    "${item.name}: image dimensions or PSD bounds changed. Confirm fitting to existing canvas bounds, or skip this layer."
+                require(fitChangedBounds || adaptChangedBounds || item.id !in used || !changedBounds(item, entries[index])) {
+                    "${item.name}: image dimensions or PSD bounds changed. Choose the updated PSD placement, fit the artwork to the existing bounds, or skip this layer."
                 }
             }
             return resolved
@@ -45,7 +46,7 @@ internal object WorkspaceMaterialReimport {
         fun retained(resolved: Map<Int, String>): Int = items.count { it.id !in resolved.values }
         fun updated(resolved: Map<Int, String>): Int {
             val byId = items.associateBy { it.id }
-            return resolved.count { (index, id) -> byId[id]?.let { !WorkspaceMaterialLinks.shows(it.raster, entries[index].raster) } == true }
+            return resolved.count { (index, id) -> byId[id]?.let { changedBounds(it, entries[index]) || !WorkspaceMaterialLinks.shows(it.raster, entries[index].raster) } == true }
         }
     }
 
@@ -175,7 +176,11 @@ internal object WorkspaceMaterialReimport {
         val folderId = request.getValue("folder_id").jsonPrimitive.content
         val plan = plan(document.layout.materials, folderId, entries, WorkspaceMaterialEdits.referencedMaterialIds(document.layout))
         val choices = request["choices"]?.jsonObject?.mapKeys { it.key.toInt() }?.mapValues { it.value.jsonPrimitive.content }.orEmpty()
-        val resolved = plan.resolve(choices, request["fit_changed_bounds"]?.jsonPrimitive?.boolean == true)
+        val fit = request["fit_changed_bounds"]?.jsonPrimitive?.boolean == true
+        val adapt = request["adapt_changed_bounds"]?.jsonPrimitive?.boolean == true
+        require(!(fit && adapt)) { "Choose one placement for changed artwork" }
+        val resolved = plan.resolve(choices, fit, adapt)
+        val refresh = mutableSetOf<String>()
         var next = document
         val additions = ArrayList<WorkspaceMaterialFiles.Entry>()
         for ((index, entry) in entries.withIndex()) {
@@ -185,13 +190,22 @@ internal object WorkspaceMaterialReimport {
                 NEW -> additions += entry.copy(folder = relativeFolders(entry), fileFolder = -1)
                 else -> {
                     val item = next.layout.materials.item(target)!!
-                    if (!WorkspaceMaterialLinks.shows(item.raster, entry.raster))
+                    val samePixels = WorkspaceMaterialLinks.shows(item.raster, entry.raster)
+                    val updated = item.copy(raster = if (samePixels) item.raster else entry.raster, kind = entry.kind, svg = entry.svg,
+                        placement = entry.placement, placementWidth = entry.placementWidth, placementHeight = entry.placementHeight,
+                        origin = entry.origin, sourceLayerId = entry.sourceLayerId, sourceLayerPath = entry.sourceLayerPath)
+                    if (adapt && changedBounds(item, entry)) {
+                        for (id in WorkspaceMaterialLinks.users(next, item.id)) {
+                            work.checkpoint()
+                            val layer = next.source.layers.single { it.id.raw == id }
+                            val rect = WorkspaceTextureEdits.artworkPlacement(next, layer, updated)
+                            next = LayerImageReplace.replace(next, id, entry.raster, LayerImageReplace.Fit.STRETCH, rect)
+                            if (next.layout.generation.generated && id !in WorkspaceLayoutPreview.pendingIds(next) &&
+                                id !in next.layout.referenceLayerIds) refresh += id
+                        }
+                    } else if (!samePixels)
                         next = WorkspaceMaterialPixels.replace(next, model, item, entry.raster)
                     val current = next.layout.materials.item(target)!!
-                    // Keep library organisation, user labels, tags and appearance defaults. Future placements use the new PSD bounds.
-                    val updated = current.copy(placement = entry.placement, placementWidth = entry.placementWidth,
-                        placementHeight = entry.placementHeight, origin = entry.origin,
-                        sourceLayerId = entry.sourceLayerId, sourceLayerPath = entry.sourceLayerPath)
                     if (updated != current) next = next.copy(layout = next.layout.copy(materials = next.layout.materials.copy(
                         items = next.layout.materials.items.map { if (it.id == target) updated else it })))
                 }
@@ -206,6 +220,7 @@ internal object WorkspaceMaterialReimport {
                 parent = existing.id
             }
         }
+        if (refresh.isNotEmpty()) next = WorkspaceGenerationEdits.refreshArtwork(next, refresh)
         if (additions.isNotEmpty()) next = WorkspaceMaterialEdits.add(next, additions, folderId, work::checkpoint)
         val source = entries.withIndex().firstOrNull { resolved[it.index] != SKIP }?.value ?: return next
         val folder = next.layout.materials.folder(folderId)!!

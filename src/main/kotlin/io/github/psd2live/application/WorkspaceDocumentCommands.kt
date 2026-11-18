@@ -9,6 +9,7 @@ import io.github.psd2live.project.WorkspaceDocument
 import io.github.psd2live.project.WorkspaceMutationResult
 import io.github.psd2live.project.WorkspaceRevisions
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
@@ -149,7 +150,8 @@ internal class WorkspaceDocumentCommands(private val runtime: WorkspaceRuntime<R
                     batch?.painting(index, fraction, message) ?: context[WorkspaceJobContext]?.progress(0.05f + 0.75f * fraction, message)
                 }, resources, draftInputs) }
                 draft.copy(document = if (operation.operation in WorkspaceModifierEdits.supported || operation.operation == "modifier_rebind") previews.normalizeMeshEdits(candidate, model)
-                    else normalizeCandidate(candidate, model))
+                    else normalizeCandidate(if (candidate !== document && WorkspaceArtworkRemesh.requested(operation, document))
+                        WorkspaceArtworkRemesh.transfer(candidate, model) { context.ensureActive() } else candidate, model))
             }
         }
         val prepared = withContext(draftInputs) {
@@ -160,6 +162,7 @@ internal class WorkspaceDocumentCommands(private val runtime: WorkspaceRuntime<R
             WorkspaceAssetLayerEdits.validate(prepared.before.document, prepared.draft.document, prepared.model)
             try {
                 WorkspaceModifierEdits.validateAppliedContent(prepared.before.model, prepared.model)
+                if (edits.any { WorkspaceArtworkRemesh.requested(it, prepared.before.document) }) WorkspaceGenerationEdits.validateRefresh(prepared.before.model, prepared.model)
             } catch (failure: IllegalArgumentException) {
                 val index = edits.lastIndex
                 throw WorkspaceBatchEditException(index, edits[index].operation, failure)

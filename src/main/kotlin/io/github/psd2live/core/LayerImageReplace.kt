@@ -3,21 +3,15 @@ package io.github.psd2live.core
 import io.github.psd2live.project.WorkspaceDocument
 import io.github.psd2live.document.WorkspaceSourceArt
 import io.github.psd2live.document.WorkspaceSourceLayer
+import io.github.psd2live.document.LayerCanvasRect
 import io.github.psd2live.document.canvasRect
 import org.umamo.format.art.LayerRaster
 import kotlin.math.roundToInt
 
 /**
- * Replaces one layer's pixels with a raster of any size while the layer keeps its place on the canvas.
- *
- * The layer's canvas rectangle and integer bounds do not change; only its raster does, so its density
- * ([LayerSpace]) becomes `raster / rectangle`. The rig is kept: the document's generation input is frozen
- * at the pixels before the first replacement (as a paint that keeps its bindings does), so meshes, keyforms,
- * paths and glue are generated from the same shapes as before. Layer offsets are canvas units, so a
- * rebuild binds the same offsets onto the new raster's tile: only the bound uvs and pages differ. The atlas
- * holds the new raster at its own resolution, scaled by the texture density and the atlas fit ([AtlasLayout]).
- *
- * The result is a candidate document; callers rebuild and commit it as any other edit.
+ * Replace the displayed raster and freeze the preceding generation input for rig replay.
+ * By default the old frame is retained. A source-sized replacement supplies the new frame
+ * in layer coordinates; the layer transform continues to place it on the canvas.
  */
 internal object LayerImageReplace {
 	/** How a raster of another aspect ratio is laid onto the rectangle. */
@@ -32,10 +26,11 @@ internal object LayerImageReplace {
 	const val MAX_PIXELS: Long = 16L * 1024 * 1024
 
 	/**
-	 * [document] with layer [layerId]'s raster replaced by [raster] laid onto its unchanged canvas rectangle
+	 * [document] with layer [layerId]'s raster replaced by [raster] laid onto [placement] or the existing canvas rectangle
 	 * by [fit]. The pixels before the first replacement or paint become the generation input.
 	 */
-	fun replace(document: WorkspaceDocument, layerId: String, raster: LayerRaster, fit: Fit): WorkspaceDocument {
+	fun replace(document: WorkspaceDocument, layerId: String, raster: LayerRaster, fit: Fit,
+	            placement: LayerCanvasRect? = null): WorkspaceDocument {
 		require(raster.width > 0 && raster.height > 0) { "Replacement raster is empty" }
 		require(raster.rgba.size.toLong() == raster.width.toLong() * raster.height * 4) { "Replacement raster does not match its size" }
 		require(raster.width.toLong() * raster.height <= MAX_PIXELS) { "Replacement raster exceeds ${MAX_PIXELS / (1024 * 1024)} megapixels" }
@@ -43,13 +38,18 @@ internal object LayerImageReplace {
 		val index = layers.indexOfFirst { it.id.raw == layerId }
 		require(index >= 0) { "Unknown source layer: $layerId" }
 		val layer = layers[index]
-		val rect = layer.canvasRect()
+		val rect = placement ?: layer.canvasRect()
 		require(rect.width > 0f && rect.height > 0f) { "Layer $layerId has an empty canvas rectangle" }
 		val laid = when (fit) {
 			Fit.STRETCH -> raster
 			Fit.CONTAIN -> contained(raster, rect.width / rect.height)
 		}
-		val replaced = (WorkspaceSourceLayer.copyOf(layer, layer.order) as WorkspaceSourceLayer).copy(raster = laid)
+		val old = WorkspaceSourceLayer.copyOf(layer, layer.order) as WorkspaceSourceLayer
+		val replaced = if (placement == null) old.copy(raster = laid) else {
+			LayerSizeBudget.require(laid.width, laid.height, placement)
+			val (bounds, stored) = LayerSizeBudget.enclosing(placement)
+			old.copy(raster = laid, bounds = bounds, rect = stored)
+		}
 		val source = WorkspaceSourceArt(document.source.widthPx, document.source.heightPx,
 			layers.mapIndexed { i, old -> if (i == index) replaced else old }, document.source.groups)
 		return document.copy(source = source,

@@ -71,7 +71,7 @@ class WorkspaceMaterialReimportTest {
         assertEquals(1, plan(library(item("a", entry()))).retained(emptyMap()))
     }
 
-    @Test fun usedMaterialBoundsNeedExplicitFitButCanBeSkippedOrAddedSeparately() {
+    @Test fun changedUsedBoundsRequireAPlacementDecisionAndSupportAdaptingOrFitting() {
         val old = entry()
         val lib = library(item("a", old))
         for (changed in listOf(old.copy(raster = LayerRaster(1, 4, raster.rgba)),
@@ -80,10 +80,30 @@ class WorkspaceMaterialReimportTest {
             assertEquals(WorkspaceMaterialReimport.Reason.CHANGED_BOUNDS, p.issues.single().reason)
             assertFailsWith<IllegalArgumentException> { p.resolve(mapOf(0 to "a"), false) }
             assertEquals("a", p.resolve(mapOf(0 to "a"), true)[0])
+            assertEquals("a", p.resolve(mapOf(0 to "a"), false, adaptChangedBounds = true)[0])
             assertEquals(WorkspaceMaterialReimport.SKIP, p.resolve(mapOf(0 to WorkspaceMaterialReimport.SKIP), false)[0])
             assertEquals(WorkspaceMaterialReimport.NEW, p.resolve(mapOf(0 to WorkspaceMaterialReimport.NEW), false)[0])
             assertTrue(plan(lib, changed).issues.isEmpty())
         }
+    }
+
+    @Test fun aSharedInstanceKeepsItsOwnPlacementScaleAndFlipWhenPsdBoundsMove() {
+        val old = item("a", entry())
+        val doc = Characters.figure()
+        val source = doc.source.layers.first()
+        val flip = LayerTransform(-1f, 0f, 0f, 1f, 140f, 0f)
+        val placed = (WorkspaceSourceLayer.copyOf(source, source.order) as WorkspaceSourceLayer).copy(
+            bounds = org.umamo.format.art.LayerBounds(30, 40, 4, 6), raster = raster, layerTransform = flip, derived = true)
+        val linked = doc.copy(source = WorkspaceSourceArt(100, 100, listOf(placed), emptyList()),
+            layout = doc.layout.copy(materials = library(old), layerMaterials = mapOf(source.id.raw to old.id)))
+        val moved = old.copy(placement = LayerCanvasRect(3f, 1f, 4f, 2f))
+        val rect = WorkspaceTextureEdits.artworkPlacement(linked, placed, moved)
+        assertEquals(LayerCanvasRect(34f, 37f, 8f, 6f), rect)
+        val next = io.github.psd2live.core.LayerImageReplace.replace(linked, placed.id.raw, raster,
+            io.github.psd2live.core.LayerImageReplace.Fit.STRETCH, rect)
+        assertEquals(flip, next.source.layers.single().transform)
+        assertEquals(rect, next.source.layers.single().canvasRect())
+        assertContentEquals(raster.rgba, next.source.layers.single().raster.rgba)
     }
 
     @Test fun repeatedDropsUseSourceIdentityAndUncertainSourcesOfferSeparateImport() {

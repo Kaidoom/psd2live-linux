@@ -254,6 +254,7 @@ internal object WorkspaceSettingsCodec {
         put("meshSpacing", config.meshSpacing)
         put("meshUnits", config.meshUnits.name)
         // Absent means the canvas trace, so the settings of projects saved before it keep their exact text.
+        if (config.visiblePixelMeshLayers.isNotEmpty()) put("visiblePixelMeshLayers", JsonArray(config.visiblePixelMeshLayers.sorted().map(::JsonPrimitive)))
         if (config.meshTrace != io.github.psd2live.core.MeshTrace.CANVAS) put("meshTrace", config.meshTrace.name)
         // Absent means no wrap, likewise.
         if (config.meshWrap != 0f) put("meshWrap", config.meshWrap)
@@ -347,6 +348,7 @@ internal object WorkspaceSettingsCodec {
             ?.let { runCatching { io.github.psd2live.core.MeshUnits.valueOf(it) }.getOrNull() }
             ?: if ("meshSpacing" in value) io.github.psd2live.core.MeshUnits.PIXELS else base.meshUnits,
         // Complete settings without a trace were saved before the texture trace, or chose the canvas one.
+        visiblePixelMeshLayers = value["visiblePixelMeshLayers"]?.jsonArray?.map { it.jsonPrimitive.content }?.toSet().orEmpty(),
         meshTrace = value["meshTrace"]?.jsonPrimitive?.contentOrNull
             ?.let { runCatching { io.github.psd2live.core.MeshTrace.valueOf(it) }.getOrNull() }
             ?: if ("meshSpacing" in value) io.github.psd2live.core.MeshTrace.CANVAS else base.meshTrace,

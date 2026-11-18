@@ -704,7 +704,7 @@ Layers not yet generated move up or down one step with {key:LAYER_FORWARD} / {ke
 ## Organizing materials
 - Drag a material to another folder to move it; right-click to rename, create a folder or delete. A material in use by a layer cannot be deleted. Tags on a folder carry to every layer placed from it.
 - Double-click a material to open a separate material window, where you can zoom, paint, flip and recolor; every layer using that material updates together.
-- Right-click a material and choose **Replace selected layer's image**: the layer's position and size on the canvas stay the same and only the pixels change; see [[psd-re-import]].
+- Right-click a material and choose **Replace selected layer's image**: a matching PSD layer uses its source placement. See [[psd-re-import]].
 - Every layer has a material as the one source of its pixels: importing a PSD, a CMO3 or images and splitting a layer register them. When layers share a material, painting any of them paints the material; to change only one, right-click **Make material its own**. In older projects, layers without a material are offered **Add to library** at the top of the Materials panel.
 - Reference images such as the original art or drafts can be placed as reference images or reference layers; see [[sketch]].
 
@@ -723,12 +723,11 @@ The chosen preset is remembered, and PSDs imported later from the menu, recent f
 *> For users coming from Cubism: parts are built automatically from the recognized parts, not from the PSD folders. To open an existing Cubism model project, use [[cmo3-import]].
 
 @@ psd-re-import | Re-import PSDs
-After the artwork changes, you can put only the new pixels into the existing project, and the edits you made to the model are all kept. PSD2Live does not match up the layers of a whole PSD; it replaces layer by layer:
-## Replacing a layer's pixels
-1. In the Materials panel **Import** the modified PSD; it becomes a new material folder.
-2. Select the layer to update on the canvas or in the layer list.
-3. Right-click the new material and choose **Replace selected layer's image**. The layer's position and size on the canvas stay the same; only the pixels and the atlas tile change.
-4. Click **Regenerate** in the generate bar. A layer whose image was replaced is rebuilt by default with a mesh from the new pixels; to keep the original mesh, choose **Generate, keeping replaced images' meshes** in the generate button's drop-down.
+Right-click the original PSD folder in **Materials**, choose **Reimport PSD**, and select the updated file. Review any uncertain matches or changes to layer bounds. Leave **Fit updated artwork to existing canvas bounds** off to use the updated PSD placement and remesh changed layers. Enable it to keep their current canvas rectangles.
+## Replacing one layer's pixels
+1. Select the layer to update on the canvas or in the layer list.
+2. Right-click the replacement material and choose **Replace selected layer's image**. A matching PSD layer uses its source placement. Other images are centred on the selected layer.
+3. A live source mesh updates immediately. For a staged replacement, **Generate, remeshing replaced images** traces the updated artwork. **Generate, keeping replaced images' meshes** keeps the current topology.
 A single layer can also be replaced in the **Texture** panel with **Replace image…**; see [[png-file-export-replacement]]. When the artwork gains a new part, treat it as a new material, drag it onto the canvas, tag it, and **Regenerate**; see [[layout-project]].
 !> For a layer that already has authored edits, bindings or materialized meshes, replacing the image and rebuilding the mesh may be refused, and the reason is shown above the atlas page.
 ## Regenerate from scratch
@@ -800,9 +799,9 @@ To modify a texture in a drawing program, export it first, and after editing, re
 ## Replace
 1. Select the layer to replace.
 2. In the **Texture** panel click **Replace image…** (or right-click a tile on the atlas page).
-3. Choose the fit method **Stretch** or **Contain**, and whether to **Rebuild the mesh from the new pixels**.
-The new image can be any resolution; the canvas rectangle stays the same, and a larger image raises the layer's density. You can also right-click in the Materials panel and choose **Replace selected layer's image**.
-!> For a layer that already has authored edits, bindings or materialized meshes, replacing the image and rebuilding the mesh is refused, and the reason is shown above the atlas page.
+3. Choose **Artwork size** to keep the image's proportions, **Stretch** to fill the current rectangle, or **Contain** to centre it inside the rectangle. Select **Rebuild the mesh from the new pixels** to trace the new outline.
+The new image can be any supported resolution. You can also right-click in the Materials panel and choose **Replace selected layer's image**.
+!> If a saved binding cannot follow the new mesh, the editor explains the conflict. Choose a fit within the existing rectangle to retain the topology.
 *> To fix only a few pixels, [[paint-mode]] is easier.
 
 @@ texture-upscale | Texture upscale
