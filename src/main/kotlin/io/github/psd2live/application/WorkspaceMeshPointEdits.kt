@@ -40,16 +40,18 @@ internal object WorkspaceMeshPointEdits {
     /** A newly authored mesh retains baked motion until the next paint or bake. When the solver needs the
      * edited surface, move these same records in front of the live simulations and migrate their fallback
      * weights with the topology reducer. Never reorder across another geometry producer. */
-    data class SimulationMesh(val stack: RigModifierStack, val owner: String)
-
-    fun simulationInput(model: RigPreviewModel, targets: Set<String>): SimulationMesh? {
+    fun simulationInput(model: RigPreviewModel, targets: Set<String>): RigModifierStack? {
         val evaluation = model.modifierEvaluation ?: return null
         val stack = evaluation.stack
         val tail = stack.instances.takeLastWhile { instance ->
+            val records = stack.overrides[instance.id].orEmpty()
             instance.enabled && instance.type == ModifierAuthorEdits.TYPE && instance.id in stack.appliedNodes &&
-                stack.overrides[instance.id].orEmpty().let { it.isNotEmpty() && it.all { edit -> "mesh_baseline" in edit } }
+                records.any { "mesh_baseline" in it } && records.all { edit ->
+                    "mesh_baseline" in edit || edit["op"]?.jsonPrimitive?.content == VertexGroupJournal.PUT
+                }
         }
-        val edits = tail.flatMap { stack.overrides.getValue(it.id) }
+        // Painted values move with their stage. The fallback weights only need the topology migration.
+        val edits = tail.flatMap { stack.overrides.getValue(it.id) }.filter { "mesh_baseline" in it }
         val meshes = edits.mapTo(hashSetOf()) { it.getValue("id").jsonPrimitive.content }
         if (targets.none { it in meshes }) return null
         val start = stack.instances.indexOfFirst { it.type == "simulation" && it.id !in stack.appliedNodes }
@@ -80,8 +82,63 @@ internal object WorkspaceMeshPointEdits {
             }
             sim.copy(config = JsonObject(sim.config + ("automatic_weights" to JsonArray(migrated))))
         }
-        return SimulationMesh(stack.copy(instances = stack.instances.take(start) + tail + updated), tail.last().id)
+        return stack.copy(instances = stack.instances.take(start) + tail + updated)
     }
+
+    /** Weights painted on a mesh that has already been edited must use that vertex numbering.
+     * Ordinary weight gestures continue through the existing weight journal. */
+    fun recordWeights(document: WorkspaceDocument, model: RigPreviewModel, edits: JsonArray, autoBake: Boolean = false): WorkspaceDocument? {
+        val evaluation = model.modifierEvaluation ?: return null
+        if (!onlyWeights(edits) ||
+            GeometryEditStages.stage(edits) != "auto") return null
+        var stack = evaluation.stack
+        val targets = edits.mapTo(linkedSetOf()) { it.jsonObject.getValue("target").jsonPrimitive.content.removePrefix("mesh:") }
+        val edited = stack.instances.any { entry ->
+            entry.type == ModifierAuthorEdits.TYPE && entry.enabled && stack.overrides[entry.id].orEmpty().any {
+                "mesh_baseline" in it && it.getValue("id").jsonPrimitive.content in targets
+            }
+        }
+        if (!edited) return null
+        val commands = RigAuthoringJournal.compile(model.rig.puppet, GeometryEditStages.clean(edits)).second
+        if (commands.isEmpty()) return document
+        val moved = simulationInput(model, targets)
+        if (moved != null) stack = moved
+        val boundary = stack.instances.indexOfFirst { it.type == "simulation" && it.id !in stack.appliedNodes }
+            .takeIf { it >= 0 } ?: stack.instances.size
+        if (moved == null && boundary < stack.instances.size) {
+            val input = if (boundary == 0) evaluation.authored else evaluation.outputs[boundary - 1]
+            val shown = requireNotNull(model.rig.modifierOutput)
+            require(targets.all { id ->
+                val a = input.meshes.singleOrNull { it.id == id }?.geometry
+                val b = shown.meshes.singleOrNull { it.id == id }?.geometry
+                a != null && b != null && a.positions.size == b.positions.size && a.indices == b.indices && a.uvs == b.uvs
+            }) { "Cannot match the painted vertices at the simulation input" }
+            for (index in boundary until stack.instances.size) {
+                if (stack.instances[index].type == "simulation") continue
+                val before = if (index == 0) evaluation.authored else evaluation.outputs[index - 1]
+                val after = evaluation.outputs[index]
+                require(before.authoring.vertexGroups.filter { it.mesh in targets } == after.authoring.vertexGroups.filter { it.mesh in targets }) {
+                    "A later modifier rewrites the weight groups on the edited mesh"
+                }
+            }
+        }
+        val last = stack.instances.getOrNull(boundary - 1)
+        val owner = if (last?.type == ModifierAuthorEdits.TYPE && last.enabled && last.id in stack.appliedNodes &&
+            last.targets.map { it.id }.containsAll(targets)) last.id else {
+            val appended = ModifierAuthorEdits.append(stack, targets.map { ModifierTarget("mesh", it) })
+            val entry = appended.instances.last()
+            stack = appended.copy(instances = stack.instances.take(boundary) + entry + stack.instances.drop(boundary))
+            entry.id
+        }
+        val pending = if (autoBake) stack.pendingWeightEdits - stack.instances.drop(boundary).map { it.id }
+            else stack.pendingWeightEdits
+        val updated = stack.withOverrides(owner, stack.overrides[owner].orEmpty() + commands).copy(pendingWeightEdits = pending)
+        return document.copy(rigEdits = document.rigEdits.copy(modifierStack = updated.toJson()))
+    }
+
+    private val weightOperations = setOf(VertexGroupJournal.PUT, VertexGroupJournal.DELETE, VertexGroupJournal.RULE)
+
+    fun onlyWeights(edits: JsonArray) = edits.isNotEmpty() && edits.all { it.jsonObject["op"]?.jsonPrimitive?.content in weightOperations }
 
     /** Commands in a mixed gesture can depend on the previous command's result. Keep one transaction,
      * rebuilding at each change of stage so later commands see the mesh they are indexed against. */

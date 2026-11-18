@@ -41,14 +41,21 @@ def check_classpath(app):
 
 def check_launcher(app, home, project=None, plugins=None):
     home.mkdir()
-    env = dict(os.environ, JAVA_HOME="/nonexistent-jdk", JAVA_TOOL_OPTIONS=(
+    empty_path = home / "empty-path"
+    empty_path.mkdir()
+    env = dict(os.environ, JAVA_HOME="/nonexistent-jdk", PATH=str(empty_path), JAVA_TOOL_OPTIONS=(
         f'-Duser.home="{home}" -Djava.util.prefs.userRoot="{home / "prefs"}"'))
-    env["PATH"] = str(home / "no-system-executables")
+    for key in ("_JAVA_OPTIONS", "JDK_JAVA_OPTIONS"):
+        env.pop(key, None)
     for args in (("--help", "--lang", "en"), ("targets", "--lang", "en")):
         result = subprocess.run([str(app / "bin/PSD2Live"), *args], cwd=home, env=env,
                                 capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, f"{args}: exit {result.returncode}\n{result.stderr}"
-        assert result.stdout.strip(), f"{args}: no output"
+        if args[0] == "--help":
+            assert "--input" in result.stdout, result.stdout
+        else:
+            targets = {line.split()[0] for line in result.stdout.splitlines() if line and not line[0].isspace()}
+            assert {"cmo3", "moc3", "p2lrt"} <= targets, targets
         print(f"{app.name}: {' '.join(args)} passed")
 
     # Exercise the same fat JAR and Java launcher used by built-in plugin subprocesses.

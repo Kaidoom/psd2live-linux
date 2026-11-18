@@ -176,14 +176,31 @@ tasks.named("compileTestKotlin").configure {
 	enabled = true
 }
 
-// Test classes run in parallel JVMs. Each fork already uses every core for coroutine work, so a quarter of
-// the cores (at most 8 forks of 2 GiB) is enough; -Ppsd2live.testForks=N overrides it, and -Ppsd2live.testHeap
-// the heap (for tools on large inputs).
+allprojects {
+	tasks.withType<Test>().configureEach {
+		useJUnitPlatform()
+		filter.isFailOnNoMatchingTests = false
+		testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+	}
+}
+
+// Preserve the module-level quickTest entry points.
+subprojects {
+	if (path == ":umamo" || path.startsWith(":format-") || path.startsWith(":targets:")) {
+		plugins.withId("org.jetbrains.kotlin.jvm") {
+			tasks.register("quickTest") {
+				group = "verification"
+				dependsOn("test")
+			}
+		}
+	}
+}
+
+// Give each fork roughly four CPUs, up to eight JVMs. Both fork count and heap can be overridden.
 val testForks = providers.gradleProperty("psd2live.testForks").map(String::toInt)
 	.orElse(providers.provider { (Runtime.getRuntime().availableProcessors() / 4).coerceIn(1, 8) })
 
 tasks.withType<Test>().configureEach {
-	useJUnitPlatform()
 	// Development tools measure this invocation and write artifacts outside test reports.
 	// Never substitute a cached/skipped test task for an actual measurement.
 	val toolsEnabled = providers.environmentVariable("PSD2LIVE_TOOLS").orNull == "1"
@@ -191,27 +208,43 @@ tasks.withType<Test>().configureEach {
 	if (toolsEnabled) {
 		outputs.upToDateWhen { false }
 		outputs.doNotCacheIf("Development tools require fresh execution") { true }
+	} else {
+		// Share CPU between forks instead of sizing each JVM's GC and coroutine pools for the whole host.
+		val processors = (Runtime.getRuntime().availableProcessors() / testForks.get()).coerceAtLeast(1)
+		jvmArgs("-XX:ActiveProcessorCount=$processors")
 	}
 	maxHeapSize = providers.gradleProperty("psd2live.testHeap").getOrElse("2g")
-	// `--tests` names one class from either module; the other module simply has nothing to run.
-	filter.isFailOnNoMatchingTests = false
 	maxParallelForks = testForks.get()
 	// App settings use Java Preferences, which the platform shares between processes (and with the
 	// user's real settings); every test JVM gets its own in-memory store instead.
 	systemProperty("java.util.prefs.PreferencesFactory", "io.github.psd2live.testing.MemoryPreferencesFactory")
 	// The Rust runtime, when built with `cargo build --release` in runtime/; tests that need it skip without it.
 	systemProperty("psd2live.runtime.dir", file("runtime/target/release").absolutePath)
-	// CI keeps no test reports, so a failure's message and stack must reach the log.
-	testLogging {
-		events(org.gradle.api.tasks.testing.logging.TestLogEvent.FAILED)
-		exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
-		showStackTraces = true
-	}
 }
 
 tasks.test {
-	enabled = true
+	if (providers.environmentVariable("PSD2LIVE_TOOLS").orNull != "1") {
+		// Short regression runs finish sooner without compiling long-lived optimized JVM code.
+		jvmArgs("-XX:TieredStopAtLevel=1")
+	}
+	mustRunAfter("buildRuntime")
+	useJUnitPlatform { excludeTags("plugin-build") }
+	inputs.property("nativeRequired", providers.environmentVariable("PSD2LIVE_NATIVE_REQUIRED").orElse("0"))
+	inputs.property("gitPluginTest", providers.environmentVariable("PSD2LIVE_PLUGIN_GIT_TEST").orElse("0"))
+	inputs.file("plugins/native-core/plugin.manifest.json")
+	inputs.files(fileTree("plugins/native-core/target/release") { include("psd2live-native-core", "psd2live-native-core.exe") })
+	inputs.files(fileTree("runtime/target/release") { include(System.mapLibraryName("p2l_runtime")) })
 }
+
+// A managed plugin build starts its own Gradle processes. Keep this acceptance suite in check and CI.
+val pluginBuildTest by tasks.registering(Test::class) {
+	group = "verification"
+	testClassesDirs = sourceSets.test.get().output.classesDirs
+	classpath = sourceSets.test.get().runtimeClasspath
+	useJUnitPlatform { includeTags("plugin-build") }
+	maxParallelForks = 1
+}
+tasks.check { dependsOn(pluginBuildTest) }
 
 // Keep Cubism out of classpath resources unless explicitly opted in.
 tasks.processResources {
@@ -412,6 +445,18 @@ tasks.withType<Sync>().matching { it.name == "prepareAppResources" }.configureEa
 	}
 }
 
+// Saved algorithm plugins run in separate JVMs through $JAVA = java.home/bin/java.
+// Compose 1.11.1 strips that executable by default and exposes the switch only on its jlink task.
+// Configure the pinned task directly: freeArgs precede Compose's --strip-native-commands, so a
+// --disable-plugin override there is undone. The packaged-worker smoke test guards this integration.
+@Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+fun org.jetbrains.compose.desktop.application.tasks.AbstractJLinkTask.retainWorkerJavaLauncher() {
+	stripNativeCommands.set(false)
+}
+tasks.withType<org.jetbrains.compose.desktop.application.tasks.AbstractJLinkTask>().configureEach {
+	retainWorkerJavaLauncher()
+}
+
 compose.desktop {
 	application {
 		mainClass = "io.github.psd2live.MainKt"
@@ -444,26 +489,22 @@ compose.desktop {
 	}
 }
 
-// Saved algorithm plugins run in separate JVMs through $JAVA = java.home/bin/java.
-// Compose 1.11.1 strips that executable by default and exposes the switch only on its jlink task.
-// Configure the pinned task directly: freeArgs precede Compose's --strip-native-commands, so a
-// --disable-plugin override there is undone. The packaged-worker smoke test guards this integration.
-@Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
-fun org.jetbrains.compose.desktop.application.tasks.AbstractJLinkTask.retainWorkerJavaLauncher() {
-	stripNativeCommands.set(false)
-}
-tasks.withType<org.jetbrains.compose.desktop.application.tasks.AbstractJLinkTask>().configureEach {
-	retainWorkerJavaLauncher()
-}
-
 // JDK-8380085: Linux's jpackage launcher can read only part of its startup data from a pipe when the
 // expanded classpath is long, then crash in setenv before starting Java. Keep the native launcher's
 // classpath short; the JVM reads the original, ordered dependencies from a standard JAR manifest.
 // https://github.com/openjdk/jdk/commit/54c5e41cbaabcd21d7bbf8f5667b2e35cfe12dd7
 if (hostOs == "linux") afterEvaluate {
+	val packageName = compose.desktop.application.nativeDistributions.packageName!!
+	for (variant in listOf("", "Release")) {
+		val image = tasks.named<org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask>("create${variant}Distributable")
+		tasks.named<org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask>("package${variant}Deb") {
+			// Use the patched image as jpackage's --app-image input for the Debian installer.
+			appImage.set(image.flatMap { it.destinationDir.dir(packageName) })
+		}
+	}
 	tasks.withType<org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask>()
 		.matching { it.name in setOf("createDistributable", "createReleaseDistributable") }.configureEach {
-			val name = compose.desktop.application.nativeDistributions.packageName!!
+			val name = packageName
 			val image = destinationDir.dir(name)
 			doLast {
 				val app = image.get().asFile.resolve("lib/app")
@@ -524,6 +565,33 @@ afterEvaluate {
 // ISCC.exe is found from -Ppsd2live.iscc, the ISCC environment variable or Inno Setup 6's default install folders.
 if (hostOs == "windows") afterEvaluate {
 	val distributions = compose.desktop.application.nativeDistributions
+	val packageName = distributions.packageName!!
+	val utf8Manifest = file("packaging/windows/utf8.manifest")
+	tasks.withType<org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask>()
+		.matching { it.name in setOf("createDistributable", "createReleaseDistributable") }.configureEach {
+			val image = destinationDir.dir(packageName)
+			inputs.file(utf8Manifest)
+			doLast {
+				// Both launchers locate DLLs via narrow Windows APIs before the JVM starts.
+				val sdkBin = File(System.getenv("ProgramFiles(x86)"), "Windows Kits/10/bin")
+				val arch = if (hostArm) "arm64" else "x64"
+				val mt = (System.getenv("PATH").split(File.pathSeparator).map { File(it, "mt.exe") } +
+					sdkBin.listFiles().orEmpty().sortedByDescending { it.name }.flatMap {
+						listOf(it.resolve("$arch/mt.exe"), it.resolve("x86/mt.exe"))
+					}).firstOrNull { it.isFile } ?: error("Windows packaging requires mt.exe from the Windows SDK.")
+				for (relative in listOf("$packageName.exe", "runtime/bin/java.exe")) {
+					val target = image.get().asFile.resolve(relative)
+					val patched = temporaryDir.resolve("patched.exe")
+					val existing = temporaryDir.resolve("launcher.manifest")
+					target.copyTo(patched, overwrite = true)
+					patched.setWritable(true)
+					providers.exec { commandLine(mt, "-nologo", "-inputresource:$patched;#1", "-out:$existing") }.result.get()
+					providers.exec { commandLine(mt, "-nologo", "-manifest", existing, utf8Manifest, "-outputresource:$patched;#1") }.result.get()
+					target.setWritable(true)
+					Files.move(patched.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+				}
+			}
+		}
 	val createDistributable = tasks.named<org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask>("createDistributable")
 	val packageExe = tasks.register<Exec>("packageExe") {
 		group = "compose desktop"

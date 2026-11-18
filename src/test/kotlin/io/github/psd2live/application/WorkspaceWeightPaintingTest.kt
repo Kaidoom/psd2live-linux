@@ -70,7 +70,7 @@ class WorkspaceWeightPaintingTest {
     @Test fun freshModifierWeightsPersistWithoutBaking() = roundTrip(false, false)
     @Test fun legacyWeightsKeepTheirImmediateCommitPath() = roundTrip(true, false)
 
-    @Test fun mergedMeshCarriesPaintIntoSimulationInput() = runBlocking {
+    @Test fun mergedMeshKeepsPaintAndPreviousBakeUntilExplicitBake() = runBlocking {
         val f = fixture()
         val before = f.now
         val target = before.model.rig.puppet.drawables.first { it.mesh!!.vertexCount > 3 }
@@ -91,8 +91,12 @@ class WorkspaceWeightPaintingTest {
         assertEquals(1f, weights[0])
         val evaluation = painted.model.modifierEvaluation!!
         val input = evaluation.outputs[evaluation.stack.index("sim") - 1]
-        assertEquals(count * 2, input.meshes.single { it.id == target.id.raw }.geometry!!.positions.size)
-        assertEquals(setOf("sim"), evaluation.stack.pendingWeightEdits)
+        assertEquals(target.mesh!!.vertexCount * 2, input.meshes.single { it.id == target.id.raw }.geometry!!.positions.size)
+        assertEquals(ModifierStatus.ACTIVE, evaluation.entries.single { it.instance.id == "sim" }.status)
+        commands.execute(painted.projectId, painted.state, "Bake", listOf(WorkspaceDocumentOperation("simulation_bake", req("id" to "sim"))), MutationAuthor.USER)
+        val baked = RigSimEdit.fromJson(f.now.model.modifierEvaluation!!.stack.instances.single { it.id == "sim" }.config).bake
+        assertEquals(count, assertNotNull(baked).vertexCounts.getValue(target.id.raw))
+        assertContentEquals(weights, f.now.model.rig.puppet.vertexGroups.single { it.drawableId == target.id && it.kind == VertexGroupKind.PIN }.weights)
         assertEquals(painted.model.rig.puppet.vertexGroups, f.builder.build(painted.document).rig.puppet.vertexGroups)
     }
 
@@ -116,7 +120,7 @@ class WorkspaceWeightPaintingTest {
             val old = RigModifierStack.fromJson(before.document.rigEdits.modifierStack!!).instances.single { it.id == "sim" }
             val next = RigModifierStack.fromJson(painted.document.rigEdits.modifierStack!!).instances.single { it.id == "sim" }
             assertEquals(old.config, next.config, "Painting must not rewrite simulation configuration or saved bakes")
-            assertEquals(setOf("sim"), RigModifierStack.fromJson(painted.document.rigEdits.modifierStack!!).pendingWeightEdits)
+            assertEquals(setOf("sim"), RigModifierStack.fromJson(painted.document.rigEdits.modifierStack!!).pendingWeightEdits.keys)
             assertEquals(old.inputFingerprint, next.inputFingerprint)
             assertTrue(next.enabled)
         }
@@ -156,13 +160,27 @@ class WorkspaceWeightPaintingTest {
         assertEquals(original.model.rig.puppet.vertexGroups, f.now.model.rig.puppet.vertexGroups)
     }
 
-    @Test fun pendingUpstreamWeightEditsAppearInBakeAllEvenWhenLocalWeightsMatch(): Unit = runBlocking {
+    @Test fun legacyPendingWeightsSurviveLoadingAndCanBeBakedExplicitly(): Unit = runBlocking {
         val f = fixture()
         val overlay = f.now.document.rigEdits
         val sim = SimulationCatalog.entries(overlay).single()
-        val stack = RigModifierStack.fromJson(overlay.modifierStack!!)
-        val pending = overlay.copy(modifierStack = stack.copy(pendingWeightEdits = setOf(sim.id)).toJson())
+        val pending = overlay.copy(modifierStack = JsonObject(overlay.modifierStack!! +
+            ("pendingWeightEdits" to JsonArray(listOf(JsonPrimitive(sim.id))))))
+        val restored = RigModifierStack.fromJson(pending.modifierStack!!)
+        assertEquals(emptyList(), restored.pendingWeightEdits.getValue(sim.id))
+        assertEquals(restored, RigModifierStack.fromJson(restored.toJson()))
+        val loaded = f.builder.build(f.now.document.copy(rigEdits = pending))
+        assertEquals(ModifierStatus.FAILED, loaded.modifierEvaluation!!.entries.single { it.instance.id == sim.id }.status)
+        assertEquals(f.now.model.rig.puppet.vertexGroups, loaded.rig.puppet.vertexGroups)
         assertTrue(SimulationCatalog.stale(pending, f.now.model.rig.puppet, sim), "Bake all must include explicit upstream invalidation")
+        f.runtime.install(f.now.state, "legacy-pending", f.now.document.copy(rigEdits = pending), loaded)
+        val before = f.now
+        WorkspaceDocumentCommands(f.runtime).execute(before.projectId, before.state, "Bake pending weights",
+            listOf(WorkspaceDocumentOperation("simulation_bake", req("id" to sim.id))), MutationAuthor.USER)
+        val current = f.now.model.modifierEvaluation!!
+        assertEquals(ModifierStatus.ACTIVE, current.entries.single { it.instance.id == sim.id }.status)
+        assertFalse(sim.id in current.stack.pendingWeightEdits)
+        assertEquals(loaded.rig.puppet.vertexGroups, f.now.model.rig.puppet.vertexGroups)
     }
 
     @Test fun autoBakeIsAnExplicitAtomicOptIn(): Unit = runBlocking {

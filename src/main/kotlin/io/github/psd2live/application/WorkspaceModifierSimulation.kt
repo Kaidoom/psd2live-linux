@@ -34,7 +34,8 @@ internal object WorkspaceModifierSimulation {
         for (index in stack.instances.indices) {
             work.checkpoint()
             val instance = next.instances[index]
-            if (!instance.enabled || instance.type != "simulation" || instance.id in next.appliedNodes || instance.id in next.pendingWeightEdits) continue
+            if (next.pendingWeightEdits[instance.id]?.isEmpty() == true) continue // Legacy suspended bake has no replay snapshot.
+            if (!instance.enabled || instance.type != "simulation" || instance.id in next.appliedNodes) continue
             try {
             val source = RigSimEdit.fromJson(instance.config)
             require(source.enabled && source.targets == instance.targets.map { it.id } && instance.targets.all { it.kind == "mesh" }) {
@@ -52,6 +53,12 @@ internal object WorkspaceModifierSimulation {
             activeProviders += prefix.appliedCapabilities.mapNotNull { it.id }
             val parameters = model.rig.puppet.parameters.mapTo(HashSet()) { it.id.raw }
             if (instance.parameterProviders.any { (parameter, provider) -> provider !in activeProviders || parameter !in parameters }) continue
+            val held = next.pendingWeightEdits[instance.id]
+            if (!held.isNullOrEmpty()) {
+                if (BakedWeightInput.replayInput(requireNotNull(model.rig.modifierOutput), instance, held) != null) continue
+                // The input changed independently of weight painting. Use normal preparation.
+                next = next.copy(pendingWeightEdits = next.pendingWeightEdits - instance.id)
+            }
             val fingerprint = RigModifierInput.simulationFingerprint(requireNotNull(model.rig.modifierOutput), source)
             val weighted = RigSimulationWeights.apply(model.rig.puppet, instance.config)
             val availableMotions = requireNotNull(model.rig.modifierOutput).clips.mapTo(HashSet()) { it.id }
@@ -92,7 +99,8 @@ internal object WorkspaceModifierSimulation {
     fun unchangedPrefix(before: RigModifierStack, after: RigModifierStack): Int {
         if (before.appliedCapabilities != after.appliedCapabilities) return 0
         return before.instances.zip(after.instances).takeWhile { (a, b) ->
-            (a.id in before.pendingWeightEdits) == (b.id in after.pendingWeightEdits) && a == b && before.overrides[a.id].orEmpty() == after.overrides[b.id].orEmpty() &&
+            before.pendingWeightEdits[a.id] == after.pendingWeightEdits[b.id] &&
+            a == b && before.overrides[a.id].orEmpty() == after.overrides[b.id].orEmpty() &&
                 before.appliedNodes[a.id] == after.appliedNodes[b.id] &&
                 before.retryRevisions[a.id] == after.retryRevisions[b.id]
         }.size

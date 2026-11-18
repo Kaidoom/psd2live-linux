@@ -80,7 +80,7 @@ internal object WorkspaceSimulationEdits {
         val source = RigSimEdit.fromJson(owner.config)
         val moved = if (operation.operation == "simulation_bake") WorkspaceMeshPointEdits.simulationInput(preview,
             (source.targets + source.colliders.map { it.mesh }).toSet()) else null
-        val stack = moved?.stack ?: saved
+        val stack = moved ?: saved
         val next = when (operation.operation) {
             "simulation_delete" -> stack.remove(owner.id)
             "simulation_clear_bake" -> stack.update(owner.id) { it.withoutBake() }

@@ -3,6 +3,7 @@ package io.github.psd2live.core.modifier
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 
@@ -45,7 +46,7 @@ internal data class RigModifierStack(
     /** Authored weights changed; retain saved bakes and enabled state until an explicit Bake. */
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val pendingWeightEdits: Set<String> = emptySet(),
+    val pendingWeightEdits: Map<String, List<BakedWeightInput>> = emptyMap(),
 ) {
     init {
         require(nextId > 0) { "Invalid modifier ID sequence" }
@@ -59,7 +60,7 @@ internal data class RigModifierStack(
         val kept = instances.take(end)
         val owners = kept.mapTo(hashSetOf()) { it.id }
         return copy(instances = kept, overrides = overrides.filterKeys { it in owners || it in retiredIds },
-            appliedNodes = appliedNodes.filterKeys { it in owners }, pendingWeightEdits = pendingWeightEdits.intersect(owners))
+            appliedNodes = appliedNodes.filterKeys { it in owners }, pendingWeightEdits = pendingWeightEdits.filterKeys { it in owners })
     }
 
     fun add(type: String, version: Int, targets: List<ModifierTarget>, config: JsonObject = JsonObject(emptyMap()),
@@ -83,6 +84,7 @@ internal data class RigModifierStack(
             "Updating a modifier cannot change its identity or algorithm version"
         }
         return copy(instances = instances.toMutableList().apply { set(index, updated) },
+            pendingWeightEdits = if (updated.config != instances[index].config) pendingWeightEdits - id else pendingWeightEdits,
             initializationFailures = if (updated.enabled && updated != instances[index]) initializationFailures - id else initializationFailures)
     }
 
@@ -91,7 +93,7 @@ internal data class RigModifierStack(
         require(id !in appliedNodes) { "Applied content has no running algorithm to replace" }
         val idx = index(id)
         val updated = instances[idx].copy(plugin = plugin, version = version)
-        return copy(instances = instances.toMutableList().apply { set(idx, updated) })
+        return copy(instances = instances.toMutableList().apply { set(idx, updated) }, pendingWeightEdits = pendingWeightEdits - id)
     }
 
     fun remove(id: String): RigModifierStack {
@@ -129,7 +131,15 @@ internal data class RigModifierStack(
     companion object {
         // Reject unknown state rather than silently discard ownership or a newer algorithm's configuration.
         private val codec = Json { encodeDefaults = true }
-        fun fromJson(value: JsonObject): RigModifierStack = codec.decodeFromJsonElement(serializer(), value)
+        fun fromJson(value: JsonObject): RigModifierStack {
+            // Earlier Fedora builds saved only the IDs of simulations suspended until Bake.
+            val legacyIds = value["pendingWeightEdits"] as? JsonArray ?: return codec.decodeFromJsonElement(serializer(), value)
+            val pending = legacyIds.associate { id ->
+                require(id is JsonPrimitive && id.isString) { "Expected a pending simulation ID" }
+                id.content to JsonArray(emptyList())
+            }
+            return codec.decodeFromJsonElement(serializer(), JsonObject(value + ("pendingWeightEdits" to JsonObject(pending))))
+        }
 
         /** Read only lock metadata when archiving a history whose snapshots are still lazy. */
         fun pluginReferences(value: JsonObject): List<ModifierPluginReference> = sequenceOf("instances", "appliedCapabilities")

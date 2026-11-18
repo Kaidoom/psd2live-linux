@@ -149,7 +149,11 @@ internal class WorkspaceDocumentCommands(private val runtime: WorkspaceRuntime<R
                 }, rasterWork.cancellable(context) { fraction, message ->
                     batch?.painting(index, fraction, message) ?: context[WorkspaceJobContext]?.progress(0.05f + 0.75f * fraction, message)
                 }, resources, draftInputs) }
-                draft.copy(document = if (WorkspaceMeshPointEdits.simulationInputsUnchanged(document, candidate) || operation.operation in WorkspaceModifierEdits.supported || operation.operation == "modifier_rebind" || (WorkspaceVertexGroupEdits.isWeightOperation(operation) && operation.request["auto_bake"]?.jsonPrimitive?.boolean != true)) previews.normalizeMeshEdits(candidate, model)
+                val paintOnly = (operation.operation == "vertex_group_paint" || operation.operation == "keyform_apply" &&
+                    WorkspaceMeshPointEdits.onlyWeights(operation.request.getValue("changes").jsonArray)) && operation.request["auto_bake"]?.jsonPrimitive?.boolean != true
+                val skipSimulationBake = paintOnly || operation.operation in WorkspaceModifierEdits.supported ||
+                    operation.operation == "modifier_rebind" || WorkspaceMeshPointEdits.simulationInputsUnchanged(document, candidate)
+                draft.copy(document = if (skipSimulationBake) previews.normalizeMeshEdits(candidate, model)
                     else normalizeCandidate(if (candidate !== document && WorkspaceArtworkRemesh.requested(operation, document))
                         WorkspaceArtworkRemesh.transfer(candidate, model) { context.ensureActive() } else candidate, model))
             }
@@ -207,8 +211,8 @@ internal class WorkspaceDocumentCommands(private val runtime: WorkspaceRuntime<R
                                  validate: (WorkspaceDocument, RigPreviewModel, WorkspaceDocument, RigPreviewModel) -> Unit = { _, _, _, _ -> }): WorkspaceCommit<RigPreviewModel> = WorkspaceEditObservation.observe(state, summary, taskId) {
         val prepared = runtime.prepareDraft(projectId, state, listOf(WorkspaceDraftEdit { draft, model ->
             val candidate = runInterruptible(Dispatchers.Default) { mutation(draft.document, model) }
-            draft.copy(document = if (WorkspaceMeshPointEdits.simulationInputsUnchanged(draft.document, candidate)) previews.normalizeMeshEdits(candidate, model)
-                else normalizeCandidate(candidate, model))
+            draft.copy(document = if (WorkspaceMeshPointEdits.simulationInputsUnchanged(draft.document, candidate))
+                previews.normalizeMeshEdits(candidate, model) else normalizeCandidate(candidate, model))
         }))
         // The candidate's own build, checked before anything is published.
         WorkspaceModifierEdits.validateAppliedContent(prepared.before.model, prepared.model)

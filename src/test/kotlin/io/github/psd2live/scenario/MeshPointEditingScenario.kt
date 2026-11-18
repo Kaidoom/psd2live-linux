@@ -69,7 +69,7 @@ class MeshPointEditingScenario {
         reopen()
         assertContentEquals(migrated, pin())
         assertContentEquals(merged.uvs, mesh().uvs)
-        // Weight editing can intentionally suspend simulations until Bake. All originally active non-simulation producers survive.
+        // All of the original rig generators are still present after replay.
         assertTrue(now.model.modifierEvaluation!!.entries.filter { it.instance.id in statuses && it.instance.type != "simulation" }.all { it.status == ModifierStatus.ACTIVE })
     }
 }

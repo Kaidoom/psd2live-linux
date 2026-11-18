@@ -40,7 +40,7 @@ internal object SimulationCatalog {
             SimAuthoring.AuthoredRigs(model::authoredPuppet), id, motions, progress = progress, cancelled = cancelled)
         if (cancelled()) throw java.util.concurrent.CancellationException("Simulation comparison cancelled")
         val stack = RigModifierStack.fromJson(requireNotNull(overlay.modifierStack))
-        val prefix = stack.copy(instances = stack.instances.takeWhile { it.id != entry.id })
+        val prefix = stack.prefix(stack.index(entry.id))
         val pipeline = io.github.psd2live.core.PSD2LivePipeline().apply { deferRuntimeBundles = true }
         pipeline.reuseModifierInputs(model)
         val before = pipeline.buildPreview(model.analysis.source, model.config.copy(rigEdits = overlay.copy(modifierStack = prefix.toJson())))
@@ -56,7 +56,7 @@ internal object SimulationCatalog {
 
     fun stale(overlay: RigEditOverlay, model: PuppetModel, edit: RigSimEdit): Boolean {
         val stack = overlay.modifierStack?.let(RigModifierStack::fromJson)
-        if (edit.id in stack?.pendingWeightEdits.orEmpty()) return true
+        if (stack?.pendingWeightEdits?.containsKey(edit.id) == true) return true
         val original = stack?.instances?.firstOrNull { it.type == "simulation" && it.id == edit.id }?.let { RigSimEdit.fromJson(it.config) }
         return SimBake.stale(model, if (original == null) edit else edit.copy(id = original.id))
     }
