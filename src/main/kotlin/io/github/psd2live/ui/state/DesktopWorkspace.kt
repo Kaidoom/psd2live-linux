@@ -210,6 +210,8 @@ internal class DesktopPresentation(private val viewModel: PSD2LiveViewModel) : W
         viewModel.installProjectState(view.copy(
             projectId = projectId, projectFile = file?.toString(), inputPath = source.toString(), loadedInputPath = source.toString(),
             analysis = preview.analysis, previewModel = preview,
+            // Older desktop saves stored these layers only in the history document.
+            visiblePixelMeshLayers = io.github.psd2live.project.WorkspaceSettingsCodec.visiblePixelMeshLayers(document.settings),
             documentLayerVisibility = document.layerVisibility, layerOverrides = document.layerOverrides,
             deletedLayerIds = document.deletedLayerIds, parentOverrides = document.parentOverrides, rigEdits = document.rigEdits,
             generationSource = document.generationSource,

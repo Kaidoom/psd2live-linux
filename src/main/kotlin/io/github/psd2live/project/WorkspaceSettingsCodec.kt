@@ -253,8 +253,8 @@ internal object WorkspaceSettingsCodec {
         put("textureUpscale", Json.encodeToJsonElement(config.textureUpscale))
         put("meshSpacing", config.meshSpacing)
         put("meshUnits", config.meshUnits.name)
-        // Absent means the canvas trace, so the settings of projects saved before it keep their exact text.
         if (config.visiblePixelMeshLayers.isNotEmpty()) put("visiblePixelMeshLayers", JsonArray(config.visiblePixelMeshLayers.sorted().map(::JsonPrimitive)))
+        // Absent means the canvas trace, so the settings of projects saved before it keep their exact text.
         if (config.meshTrace != io.github.psd2live.core.MeshTrace.CANVAS) put("meshTrace", config.meshTrace.name)
         // Absent means no wrap, likewise.
         if (config.meshWrap != 0f) put("meshWrap", config.meshWrap)
@@ -333,6 +333,9 @@ internal object WorkspaceSettingsCodec {
     fun decodeWrap(value: JsonElement?): Float = (value as? JsonPrimitive)?.floatOrNull
         ?.takeIf { it.isFinite() }?.coerceIn(io.github.psd2live.core.MeshWrap.range) ?: 0f
 
+    internal fun visiblePixelMeshLayers(settings: JsonObject): Set<String> =
+        settings["visiblePixelMeshLayers"]?.jsonArray?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+
     /** Decode the existing v1 setting names without constructing UI state. */
     fun decode(value: JsonObject, base: io.github.psd2live.core.PipelineConfig = io.github.psd2live.core.PipelineConfig()): io.github.psd2live.core.PipelineConfig = base.copy(
         atlasSize = value["atlasSize"]?.jsonPrimitive?.intOrNull ?: base.atlasSize,
@@ -347,8 +350,8 @@ internal object WorkspaceSettingsCodec {
         meshUnits = value["meshUnits"]?.jsonPrimitive?.contentOrNull
             ?.let { runCatching { io.github.psd2live.core.MeshUnits.valueOf(it) }.getOrNull() }
             ?: if ("meshSpacing" in value) io.github.psd2live.core.MeshUnits.PIXELS else base.meshUnits,
+        visiblePixelMeshLayers = visiblePixelMeshLayers(value),
         // Complete settings without a trace were saved before the texture trace, or chose the canvas one.
-        visiblePixelMeshLayers = value["visiblePixelMeshLayers"]?.jsonArray?.map { it.jsonPrimitive.content }?.toSet().orEmpty(),
         meshTrace = value["meshTrace"]?.jsonPrimitive?.contentOrNull
             ?.let { runCatching { io.github.psd2live.core.MeshTrace.valueOf(it) }.getOrNull() }
             ?: if ("meshSpacing" in value) io.github.psd2live.core.MeshTrace.CANVAS else base.meshTrace,
