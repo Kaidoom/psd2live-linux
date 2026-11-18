@@ -13,9 +13,12 @@ import java.util.concurrent.atomic.AtomicReference
 
 /** Personal KDE integration: the chooser lives outside the JVM, so it does not load GTK alongside Skia. */
 internal object KdeFilePicker {
-    enum class Kind(val extension: String, val filter: String) {
-        PROJECT("psd2live", "PSD2Live (*.psd2live *.PSD2LIVE)"),
-        PSD("psd", "Photoshop (*.psd *.PSD)"),
+    enum class Kind(label: String, val extensions: List<String>) {
+        PROJECT("PSD2Live", listOf("psd2live")),
+        PSD("Photoshop", listOf("psd")),
+        PSD_OR_LAYOUT("PSD / JSON / ZIP", listOf("psd", "json", "zip"));
+
+        val filter = extensions.joinToString(" ", prefix = "$label (", postfix = ")") { "*.$it *.${it.uppercase()}" }
     }
 
     internal data class Result(val directory: File, val handled: Boolean, val file: File? = null)
@@ -74,7 +77,7 @@ internal object KdeFilePicker {
         return when (exitCode) {
             0 -> Result(directory, handled = true, file = remaining.removeSuffix("\n").removeSuffix("\r")
                 .takeIf { it.isNotEmpty() }?.let(::File)?.takeIf {
-                    it.isAbsolute && it.isFile && it.name.endsWith(".${kind.extension}", ignoreCase = true)
+                    it.isAbsolute && it.isFile && it.extension.lowercase() in kind.extensions
                 })
             1 -> Result(directory, handled = true) // User cancellation must not open the fallback chooser.
             else -> Result(directory, handled = false)

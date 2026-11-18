@@ -108,7 +108,7 @@ object NativeFilePicker {
 		val result = try { KdeFilePicker.open(owner(window), title, kind, initialPath) }
 		finally { isPicking.set(false) }
 		if (result.handled) result.file?.toPath()?.toAbsolutePath()?.normalize()?.toString()
-		else chooseLinux(window, title, listOf(kind.extension), kind.filter, result.directory.path).singlePath()
+		else chooseLinux(window, title, kind.extensions, kind.filter, result.directory.path).singlePath()
 	}
 
 	/** The picker window on screen, while one is. */
@@ -157,8 +157,12 @@ object NativeFilePicker {
 	/**
 	 * Opens the modern native OS file picker for selecting a PSD file or a layout manifest (JSON, or a zip holding one).
 	 */
-	fun choosePsdFile(window: Window? = null, initialPath: String? = null): String? =
-		chooseSourceFile(window, initialPath, listOf("psd", "json", "zip"), tr("dialog.choosePsd"), tr("dialog.psdFilter"))
+	fun choosePsdFile(window: Window? = null, initialPath: String? = null): String? {
+		val kind = KdeFilePicker.Kind.PSD_OR_LAYOUT
+		val title = tr("dialog.choosePsd")
+		return if (KdeFilePicker.enabled()) chooseKdeFile(window, title, kind)
+		else chooseSourceFile(window, initialPath, kind.extensions, title, tr("dialog.psdFilter"))
+	}
 
 	fun chooseReimportPsdFile(window: Window? = null, initialPath: String? = null): String? =
 		if (isLinux) chooseKdeFile(window, tr("materials.reimport.title"), KdeFilePicker.Kind.PSD, initialPath)

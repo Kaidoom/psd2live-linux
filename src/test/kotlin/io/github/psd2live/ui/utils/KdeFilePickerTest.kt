@@ -77,6 +77,28 @@ class KdeFilePickerTest {
         } finally { directory.deleteRecursively() }
     }
 
+    @Test fun startPickerOffersAndAcceptsAllSourceFormats() {
+        val directory = Files.createTempDirectory("kde-start-picker").toFile()
+        try {
+            val kind = KdeFilePicker.Kind.PSD_OR_LAYOUT
+            val filter = KdeFilePicker.command(0x1234L, directory, "Open source", kind).last()
+            assertEquals("PSD / JSON / ZIP (*.psd *.PSD *.json *.JSON *.zip *.ZIP)", filter)
+            fun select(name: String): File? {
+                val file = File(directory, name).apply { createNewFile() }
+                val result = KdeFilePicker.result(0, "winId: 1234\n${file.path}\n", directory, kind)
+                assertTrue(result.handled)
+                return result.file
+            }
+            for (name in listOf("character.PSD", "レイアウト.JsOn", "layout bundle.zip"))
+                assertEquals(File(directory, name), select(name))
+            assertNull(select("project.psd2live"))
+            assertNull(select("layout.zip.txt"))
+            val cancelled = KdeFilePicker.result(1, "winId: 1234\n", directory, kind)
+            assertTrue(cancelled.handled)
+            assertNull(cancelled.file)
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test fun cancellationDoesNotFallBackAndSelectedPathsKeepWhitespaceAndUnicode() {
         val directory = Files.createTempDirectory("kde-picker-result").toFile()
         try {
