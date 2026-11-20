@@ -115,7 +115,6 @@ internal object Characters {
         )
     }
 
-
 	/**
 	 * A 64² head: back hair and a face. The smallest document the hair generators and simulation presets act on; its
 	 * hair keeps the one sway warp of the front and back hair ([hairChains] gives it chains instead).

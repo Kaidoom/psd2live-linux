@@ -1,4 +1,7 @@
-package io.github.psd2live.algorithms.binding
+package io.github.psd2live.core.modifier
+
+import io.github.psd2live.algorithms.binding.MouthRig
+import io.github.psd2live.algorithms.binding.MouthFittedInputs
 
 import kotlinx.serialization.json.*
 import org.umamo.runtime.eval.EPS_SPAN
@@ -7,7 +10,7 @@ import org.umamo.runtime.keyform.*
 import org.umamo.runtime.model.*
 
 /** Authored opacity stops, independent of the fitted mouth's geometry keys. */
-data class ClosedMouthVisibility(val points: List<Point>) {
+internal data class ClosedMouthVisibility(val points: List<Point>) {
     data class Point(val open: Float, val opacity: Float)
 
     init {
@@ -19,9 +22,9 @@ data class ClosedMouthVisibility(val points: List<Point>) {
 
     fun toJson() = JsonArray(points.map { JsonArray(listOf(JsonPrimitive(it.open), JsonPrimitive(it.opacity))) })
 
-    fun grid(closed: Boolean = true, opacity: Float = 1f): KeyformGrid<ChannelValue> = KeyformGrid(
+    fun grid(): KeyformGrid<ChannelValue> = KeyformGrid(
         listOf(KeyformAxis(PARAMETER, points.map { it.open }.toFloatArray())),
-        points.mapIndexed { i, p -> KeyformCell(intArrayOf(i), ChannelValue.Scalar(opacity * if (closed) p.opacity else 1f - p.opacity)) },
+        points.mapIndexed { i, p -> KeyformCell(intArrayOf(i), ChannelValue.Scalar(p.opacity)) },
     )
 
     fun sample(open: Float): Float = ChannelGrids(mapOf(FormChannel.OPACITY to grid())).scalarAt(FormChannel.OPACITY, 1f,

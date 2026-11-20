@@ -1,6 +1,5 @@
-package example
+package io.github.psd2live.core.modifier
 
-import io.github.psd2live.algorithms.binding.ClosedMouthVisibility
 import kotlinx.serialization.json.*
 import kotlin.test.*
 

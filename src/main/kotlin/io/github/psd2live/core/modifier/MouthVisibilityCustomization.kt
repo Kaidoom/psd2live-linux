@@ -1,7 +1,6 @@
 package io.github.psd2live.core.modifier
 
 import io.github.psd2live.algorithms.binding.BindingAxes
-import io.github.psd2live.algorithms.binding.ClosedMouthVisibility
 import io.github.psd2live.algorithms.binding.MouthFittedInputs
 import io.github.psd2live.bridge.PuppetIr
 import io.github.psd2live.format.model.RigIR
@@ -20,7 +19,7 @@ internal object MouthVisibilityCustomization {
         instance.type == "mouth" && (instance.config["mode"]?.jsonPrimitive?.content ?: "fitted") == "fitted"
 
     fun algorithmInstance(instance: RigModifierInstance): RigModifierInstance =
-        if (supports(instance) && ClosedMouthVisibility.CONFIG in instance.config)
+        if (instance.type in setOf("mouth", "mouth/fitted") && ClosedMouthVisibility.CONFIG in instance.config)
             instance.copy(config = JsonObject(instance.config - ClosedMouthVisibility.CONFIG)) else instance
 
     /** Ribbons inherit their open-art owner's opacity, including when generated inside a folded part. */
@@ -33,6 +32,29 @@ internal object MouthVisibilityCustomization {
         return outline.targets.filter { it.id in targets }.flatMap { target ->
             (0..1).map { side -> outline.outputId("mouth-lip:${target.id}:$side") to target.id }
         }.toMap()
+    }
+
+    fun protectedTracks(source: RigModifierSource?, stack: RigModifierStack?): Set<String> {
+        if (source == null || stack == null) return emptySet()
+        val targets = stack.instances.filter { it.enabled && supports(it) && ClosedMouthVisibility.CONFIG in it.config }
+            .flatMapTo(HashSet()) { instance ->
+                val inputs = MouthFittedInputs.decode(source.mouthFittedContext(instance))
+                ClosedMouthVisibility.targets(inputs, instance.targets.mapTo(HashSet()) { it.id })
+            }
+        if (targets.isEmpty()) return targets
+        return targets + stack.instances.filter { it.enabled }.flatMap { outlineOwners(it, targets).keys }
+    }
+
+    /** Moving or deleting a global deformation stop must preserve explicitly authored visibility. */
+    fun keepOpacity(before: PuppetModel, after: PuppetModel, targets: Set<String>): PuppetModel {
+        if (targets.isEmpty() || before === after) return after
+        val opacity = FormChannel.OPACITY
+        val tracks = before.drawables.filter { it.id.raw in targets }.associate { it.id to it.channelGrids[opacity] }
+        return after.copy(drawables = after.drawables.map { drawable ->
+            val track = tracks[drawable.id]
+            if (track == null || track === drawable.channelGrids[opacity]) drawable
+            else drawable.copy(channelGrids = ChannelGrids(drawable.channelGrids.gridsByChannel + (opacity to track)))
+        })
     }
 
     fun apply(source: RigModifierSource?, before: RigIR, generated: RigIR, instance: RigModifierInstance): RigIR {

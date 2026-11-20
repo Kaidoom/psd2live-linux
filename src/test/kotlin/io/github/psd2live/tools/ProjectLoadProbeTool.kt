@@ -1,7 +1,7 @@
 package io.github.psd2live.tools
 
 import io.github.psd2live.application.WorkspacePreviewBuilder
-import io.github.psd2live.algorithms.binding.ClosedMouthVisibility
+import io.github.psd2live.core.modifier.ClosedMouthVisibility
 import io.github.psd2live.core.RigIrCompiler
 import io.github.psd2live.core.SemanticTag
 import io.github.psd2live.format.compile.RigIrBinary

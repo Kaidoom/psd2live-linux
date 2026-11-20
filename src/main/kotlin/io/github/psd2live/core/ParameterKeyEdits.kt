@@ -109,7 +109,7 @@ internal object ParameterKeyEdits {
         require(values.isNotEmpty() && values.all { it.isFinite() && it in parameter.min..parameter.max }) {
             "Keys must be finite and within the parameter range"
         }
-        val baseline = parameter.keys ?: model.boundPointValues(parameter.id)
+        val baseline = pointValues(model, parameter.id)
         fun same(a: Float, b: Float) = abs(a - b) < EPS_KEY
         return when (action) {
             "add" -> model.withParameterKeys(parameter.id, (baseline + values).distinct().sorted())

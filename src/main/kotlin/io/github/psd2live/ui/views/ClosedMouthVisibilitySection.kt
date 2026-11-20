@@ -5,7 +5,7 @@ import androidx.compose.material.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import io.github.psd2live.algorithms.binding.ClosedMouthVisibility
+import io.github.psd2live.core.modifier.ClosedMouthVisibility
 import io.github.psd2live.core.SemanticTag
 import io.github.psd2live.core.modifier.RigModifierInstance
 import io.github.psd2live.i18n.tr
@@ -33,8 +33,9 @@ internal fun ClosedMouthVisibilitySection(instance: RigModifierInstance, state: 
             (saved != null || drawable.channelGrids[FormChannel.OPACITY]?.axes?.any { it.parameterId == ClosedMouthVisibility.PARAMETER } == true)
     } ?: return
     if (puppet.drawables.none { drawable ->
-        drawable.id.raw in targetIds && layers[model.rig.ownLayerIdByDrawableId[drawable.id.raw]]?.semantic?.tag in
-            setOf(SemanticTag.MOUTH, SemanticTag.MOUTH_OPEN)
+        val layer = layers[model.rig.ownLayerIdByDrawableId[drawable.id.raw]]
+        drawable.id.raw in targetIds && layer != null && layer.opaquePixels > 0 &&
+            layer.semantic.tag in setOf(SemanticTag.MOUTH, SemanticTag.MOUTH_OPEN)
     }) return
     val defaults = puppet.parameters.associate { it.id to it.default }
     val initial = remember(saved, closed.channelGrids) {

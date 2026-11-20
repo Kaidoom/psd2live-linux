@@ -1,6 +1,7 @@
 package io.github.psd2live.core.fit
 
 import io.github.psd2live.algorithms.binding.ThinPlateSpline
+import java.util.concurrent.ConcurrentHashMap
 
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -39,6 +40,29 @@ class FaceTurn(private val marks: FaceLandmarks, private val setting: TurnStyle.
 	val usable: Boolean = eyeL != null && eyeR != null && contour.size >= 40 && unit > 0f && chin > eyeLine
 
 	private val ends = style.ends(setting)
+	private val isDefault = style === TurnStyle.DEFAULT && setting.preset == null
+	internal val defaultTurnStrength: Float get() = if (isDefault) setting.turn else 0f
+	internal val lookStrength: Float get() = if (isDefault) setting.look else 0f
+	private val lowerFace = if (isDefault && usable) LowerFaceTurn.measure(marks, this) else null
+	private val upperFace = if (isDefault && usable) UpperFaceTurn.measure(marks, eyeLine, centre.first) else null
+	private val yawPoses = ConcurrentHashMap<Float, Pose>()
+	private val pitchPoses = ConcurrentHashMap<Float, Pose>()
+
+	internal fun widthAt(y: Float): Float {
+		var first = Float.POSITIVE_INFINITY
+		var last = Float.NEGATIVE_INFINITY
+		for (i in contour.indices) {
+			val a = contour[i]
+			val b = contour[(i + 1) % contour.size]
+			if ((a.second > y) == (b.second > y)) continue
+			val x = a.first + (b.first - a.first) * (y - a.second) / (b.second - a.second)
+			first = minOf(first, x)
+			last = maxOf(last, x)
+		}
+		return (last - first).takeIf { it > 0f } ?: unit
+	}
+
+	internal val eyeSpacing: Float get() = if (eyeL == null || eyeR == null) 0f else abs(eyeL.first - eyeR.first)
 
 	/** The outline's points the style moves: evenly by arc length from the chin, toward +x first, so point k mirrors point n - k. */
 	private val ring: IntArray = run {
@@ -59,8 +83,18 @@ class FaceTurn(private val marks: FaceLandmarks, private val setting: TurnStyle.
 	 * The head at one pose: [sx] the turn's side (+1 toward +x), [moves] the face's moves and [hair] the hair's role
 	 * fields there, [slide] the face's middle's move, [field] where every point of the face goes.
 	 */
-	inner class Pose internal constructor(val sx: Float, val moves: TurnStyle.Moves, val hair: TurnStyle.Moves) {
+	inner class Pose internal constructor(
+		val sx: Float, val moves: TurnStyle.Moves, val hair: TurnStyle.Moves,
+		internal val yaw: Float, internal val pitch: Float,
+	) {
 		val slide: Pair<Float, Float> = moves["slide_x"] * sx * unit to moves["slide_y"] * unit
+		internal val level by lazy { if (pitch == 0f) this else pose(yaw, 0f) }
+		internal val straight by lazy { if (yaw == 0f) this else pose(0f, pitch) }
+		internal val lowerFacePlacement by lazy { lowerFace?.place(this@FaceTurn, this) }
+		private val eyes by lazy { ConcurrentHashMap<FeatureTurn.Eye, FeatureTurn.PlacedEye>() }
+		internal fun eye(input: FeatureTurn.Eye): FeatureTurn.PlacedEye =
+			eyes.computeIfAbsent(input) { FeatureTurn.eye(it, this@FaceTurn, this) }
+		internal val hasTurn get() = yaw != 0f && setting.turn != 0f || pitch != 0f && setting.look != 0f
 		val field: (Float, Float) -> Pair<Float, Float> = run {
 			if (!usable || ring.isEmpty()) return@run { x: Float, y: Float -> x to y }
 			val from = ArrayList<Pair<Float, Float>>(); val to = ArrayList<Pair<Float, Float>>()
@@ -77,7 +111,13 @@ class FaceTurn(private val marks: FaceLandmarks, private val setting: TurnStyle.
 				from += p; to += (p.first + slide.first) to (p.second + slide.second)
 			}
 			val tps = ThinPlateSpline(from, to, 1e-3)
-			return@run { x: Float, y: Float -> tps.map(x, y) }
+			val upper = upperFace
+			val inset = upper?.shift(yaw, pitch, defaultTurnStrength, lookStrength) ?: 0f
+			if (inset == 0f || upper == null) return@run { x: Float, y: Float -> tps.map(x, y) }
+			return@run { x: Float, y: Float ->
+				val (px, py) = tps.map(x, y)
+				(px - sx * inset * upper.weight(x, y, sx)) to py
+			}
 		}
 
 		/**
@@ -95,12 +135,34 @@ class FaceTurn(private val marks: FaceLandmarks, private val setting: TurnStyle.
 			}
 			return best
 		}
+
+		private val posedContour by lazy { contour.map { (x, y) -> field(x, y) } }
+
+		/** Intersect the drawn or posed silhouette at the actual height of a feature point. */
+		internal fun sideAt(y: Float, outward: Float, moved: Boolean): Float? {
+			val points = if (moved) posedContour else contour
+			var edge = Float.NEGATIVE_INFINITY
+			for (i in points.indices) {
+				val (ax, ay) = points[i]
+				val (bx, by) = points[(i + 1) % points.size]
+				if ((ay > y) == (by > y)) continue
+				val x = ax + (bx - ax) * (y - ay) / (by - ay)
+				edge = maxOf(edge, x * outward)
+			}
+			return edge.takeIf { it.isFinite() }?.times(outward)
+		}
 	}
 
 	/** The head at [yaw] degrees (+ toward +x) and [pitch] (+ up). */
-	fun pose(yaw: Float, pitch: Float): Pose {
+	fun pose(yaw: Float, pitch: Float): Pose = when {
+		pitch == 0f && YAW_KEYS.any { it == yaw } -> yawPoses.computeIfAbsent(yaw) { calculatePose(it, 0f) }
+		yaw == 0f && PITCH_KEYS.any { it == pitch } -> pitchPoses.computeIfAbsent(pitch) { calculatePose(0f, it) }
+		else -> calculatePose(yaw, pitch)
+	}
+
+	private fun calculatePose(yaw: Float, pitch: Float): Pose {
 		val px = yaw / TURN_END; val py = pitch / LOOK_END
-		return Pose(if (yaw >= 0f) 1f else -1f, style.at(ends, px, py), style.hairAt(ends, px, py))
+		return Pose(if (yaw >= 0f) 1f else -1f, style.at(ends, px, py), style.hairAt(ends, px, py), yaw, pitch)
 	}
 
 	/** Where the face's points go at [yaw] and [pitch]. */

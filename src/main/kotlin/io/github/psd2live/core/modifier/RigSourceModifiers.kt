@@ -134,7 +134,9 @@ internal class RigModifierSource(
         val layers = layersById
         // Coverage depends only on source pixels and semantics. Expand against the live model in the plugin.
         val sourceMeshes = layersByMesh.keys.map { Drawable(DrawableId(it), it, null, BlendMode.Normal, emptyList(), null, null) }
-        SeeThroughLayers.candidates(materialBase.copy(drawables = sourceMeshes), config.alphaThreshold) { layers[layersByMesh[it.raw]] }
+        SeeThroughLayers.candidates(materialBase.copy(drawables = sourceMeshes), config.alphaThreshold, analysis.source.groups) {
+            layers[layersByMesh[it.raw]]
+        }
     }
 
     fun seeThroughContext(instance: RigModifierInstance): ModifierAlgorithmContext = ModifierAlgorithmContext(buildJsonObject {
@@ -2007,7 +2009,7 @@ internal object RigSourceModifiers {
                 require("scaffold" in instance.config) { "Specify mouth's scaffold" }
                 val mode = instance.config["mode"]?.jsonPrimitive?.content ?: "fitted"
                 require(mode == "fitted" || mode == "legacy") { "Invalid mouth mode: $mode" }
-                io.github.psd2live.algorithms.binding.ClosedMouthVisibility.fromConfig(instance.config)
+                ClosedMouthVisibility.fromConfig(instance.config)
                 require(instance.targets.all { it.kind == "mesh" && source?.hasMesh(it.id) == true }) {
                     "Mouth targets must have captured source layers"
                 }

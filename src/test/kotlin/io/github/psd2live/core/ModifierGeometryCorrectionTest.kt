@@ -34,6 +34,33 @@ class ModifierGeometryCorrectionTest {
         assertEquals(GeneratedOverrideIssueKind.CONFLICT, old.issues.single().kind)
     }
 
+    @Test fun onlyArtistBoundAxesCanBeCreatedWhenAnInsertedKeyReplays() {
+        val open = ParameterId("Open")
+        val source = model().copy(parameters = listOf(Parameter(open, "Open", 0f, 1f, 0f)))
+        val key = buildJsonObject { put("Open", .4f) }
+        val old = JsonObject(command(source, true) + mapOf("key" to key, "insert_keys" to JsonPrimitive(true)))
+        val artistBound = JsonObject(old + ("source_axes" to JsonArray(emptyList())))
+        val updated = GeneratedOverrides.apply(source, artistBound)
+        assertTrue(updated.issues.isEmpty())
+        val grid = updated.model.drawables.single().geometryGrid!!
+        assertContentEquals(floatArrayOf(0f, .4f, 1f), grid.axes.single().keys)
+        assertEquals(.25f, grid.cells.single { it.coordinate.single() == 1 }.form.positionDeltas.first())
+
+        // Only an archived Fedora worker with the same mesh identity can replay the earlier unmarked insertion.
+        val legacy = GeneratedOverrides.apply(source, old, legacyAxisInsertion = true)
+        assertTrue(legacy.issues.isEmpty())
+        assertEquals(io.github.psd2live.bridge.PuppetIr.toIr(updated.model), io.github.psd2live.bridge.PuppetIr.toIr(legacy.model))
+        val wrongMesh = JsonObject(old + ("geometry_binding" to JsonPrimitive("different")))
+        assertSame(source, GeneratedOverrides.apply(source, wrongMesh, legacyAxisInsertion = true).model)
+
+        val lostAxis = JsonObject(old + ("source_axes" to JsonArray(listOf(JsonPrimitive("Open")))))
+        for (record in listOf(old, lostAxis)) {
+            val replay = GeneratedOverrides.apply(source, record)
+            assertSame(source, replay.model)
+            assertEquals(GeneratedOverrideOrphanReason.MISSING_KEYFORM, replay.issues.single().reason)
+        }
+    }
+
     @Test fun equalVertexCountDoesNotPermitReplayingOnChangedConnectivity() {
         val source = model()
         val drawable = source.drawables.single()

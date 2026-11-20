@@ -47,19 +47,7 @@ internal object RigModifierAlgorithms {
     fun evaluator(source: RigModifierSource? = null, stack: RigModifierStack? = null,
                   rawSourceRotations: Boolean = false, workerSession: ModifierPluginWorkers.Session? = null,
                   overlayPackages: List<InstalledModifierPlugin> = emptyList()): RigModifierEvaluator {
-        // Only explicitly configured visibility tracks are independent of global deformation stops.
-        // Compute against captured source semantics, not mesh names or the editor's selection.
-        val visibilityTracks by lazy {
-            if (source == null) emptySet() else stack?.instances.orEmpty().filter { instance ->
-                instance.enabled && MouthVisibilityCustomization.supports(instance) &&
-                    io.github.psd2live.algorithms.binding.ClosedMouthVisibility.CONFIG in instance.config
-            }.flatMap { instance ->
-                val inputs = io.github.psd2live.algorithms.binding.MouthFittedInputs.decode(source.mouthFittedContext(instance))
-                val targets = io.github.psd2live.algorithms.binding.ClosedMouthVisibility.targets(inputs, instance.targets.mapTo(HashSet()) { it.id })
-                targets + stack?.instances.orEmpty().filter { it.enabled && it.type in setOf("mouth", "mouth.outline") }
-                    .flatMap { MouthVisibilityCustomization.outlineOwners(it, targets).keys }
-            }.toSet()
-        }
+        val protectedOpacity by lazy { MouthVisibilityCustomization.protectedTracks(source, stack) }
         return RigModifierEvaluator(
             when {
                 stack?.instances?.isEmpty() == true -> emptyRegistry
@@ -77,7 +65,9 @@ internal object RigModifierAlgorithms {
             val parameterOverrides = HashSet<String>()
             for (command in commands) {
                 if (GeneratedOverrides.isOverride(command)) {
-                    val result = GeneratedOverrides.apply(model, command)
+                    val legacyInsertion = command["insert_keys"]?.jsonPrimitive?.content == "true" && "source_axes" !in command &&
+                        BuiltinSourceContextCompatibility.usesFedoraAxisInsertion(instance)
+                    val result = GeneratedOverrides.apply(model, command, legacyAxisInsertion = legacyInsertion)
                     model = result.model
                     issues += result.issues
                 } else if (command["op"]?.jsonPrimitive?.content == "structure" && command["generator"]?.jsonPrimitive?.content == "modifier:${instance.id}") {
@@ -94,16 +84,10 @@ internal object RigModifierAlgorithms {
                 } else if (command["op"]?.jsonPrimitive?.content in setOf("parameter_keys", "delete") &&
                     command["generator"]?.jsonPrimitive?.content == "modifier:${instance.id}") {
                     val changed = try {
-                        val next = RigAuthoringJournal.apply(model, command)
-                        if (command["target"] == null && command["parameter"]?.jsonPrimitive?.content == "ParamMouthOpenY" && visibilityTracks.isNotEmpty()) {
-                            // Global key edits follow geometry, but never retime a separately authored visibility curve.
-                            val opacity = org.umamo.runtime.model.FormChannel.OPACITY
-                            val retained = model.drawables.filter { it.id.raw in visibilityTracks }.associate { it.id to it.channelGrids[opacity] }
-                            next.copy(drawables = next.drawables.map { drawable ->
-                                retained[drawable.id]?.let { track -> drawable.copy(channelGrids = org.umamo.runtime.model.ChannelGrids(
-                                    drawable.channelGrids.gridsByChannel + (opacity to track))) } ?: drawable
-                            })
-                        } else next
+                        val edited = RigAuthoringJournal.apply(model, command)
+                        if (command["target"] == null && command["parameter"]?.jsonPrimitive?.content == ClosedMouthVisibility.PARAMETER.raw)
+                            MouthVisibilityCustomization.keepOpacity(model, edited, protectedOpacity)
+                        else edited
                     } catch (_: IllegalArgumentException) {
                         model
                     } catch (_: NoSuchElementException) {
@@ -121,7 +105,6 @@ internal object RigModifierAlgorithms {
             val updated = rig.withPuppet(model)
             ModifierOverrideResult(updated, issues, updated.parameters.filter { it.id in parameterOverrides }.associateBy { it.id })
         }
-
     }
 
     internal fun simulationOutputs(instance: RigModifierInstance, source: RigSimEdit): RigSimEdit =

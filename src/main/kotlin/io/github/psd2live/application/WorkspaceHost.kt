@@ -302,11 +302,36 @@ internal class WorkspaceHost<V>(
         }
         val result = sourceImporter.importPsd(owned.path, state.capture?.projectId, state.state, discardUnsaved,
             sourceConfig(state, current), sourceAuxiliary = owned.auxiliary,
-            displayName = input.fileName.toString(), modifiers = modifiers, preset = preset) { document, preview, id ->
+            displayName = input.fileName.toString(), materialSourcePath = owned.originalPath.toString(), modifiers = modifiers, preset = preset) { document, preview, id ->
             presentation.sourceInstalled(current, document, preview, input, id)
         }
         finishSourceImport(result)
         result.mutation("Imported PSD ${input.fileName}")
+    }
+
+    internal suspend fun preparePsdGuide(path: Path): WorkspacePsdGuide {
+        val root = workspaceStore.root
+        val config = sourceConfig(runtime.state.value, presentation.current())
+        val owned = runInterruptible(Dispatchers.IO) { io.github.psd2live.project.OwnedProjectSource.capture(root, path) }
+        val document = sourceImporter.prepareGuidedPsd(owned, path.fileName.toString(), config)
+        val preview = WorkspacePreviewBuilder(deferRuntimeBundles = true).build(document)
+        return WorkspacePsdGuide(path, root, owned, WorkspacePsdGuide.Candidate(document, preview))
+    }
+
+    internal suspend fun installPsdGuide(guide: WorkspacePsdGuide, candidate: WorkspacePsdGuide.Candidate,
+                                         discardUnsaved: Boolean) = editMutex.withLock {
+        val (state, current) = captureSourceImport(discardUnsaved)
+        if (guide.storeRoot != workspaceStore.root) throw WorkspaceConflict(guide.storeRoot.toString(), workspaceStore.root.toString())
+        val preview = previewBuilder.build(candidate.document)
+        try {
+            val result = sourceImporter.installGuidedPsd(state.state, candidate.document, preview, guide.owned.auxiliary,
+                discardUnsaved) { document, model, id ->
+                presentation.sourceInstalled(current, document, model, guide.path, id)
+            }
+            finishSourceImport(result)
+        } finally {
+            preview.modifierBuildOwner?.takeUnless { it.published }?.close()
+        }
     }
 
     override suspend fun importLayout(path: String, discardUnsaved: Boolean): WorkspaceMutationResult = editMutex.withLock {
@@ -549,6 +574,13 @@ internal class WorkspaceHost<V>(
 
     /** The committed HEAD, read without the runtime lock. */
     internal fun currentHistoryHead(): String? = runtime.state.value.capture?.historyHead
+
+    internal fun turnStylePreview(expectedState: String, pose: Map<org.umamo.runtime.model.ParameterId, Float>,
+                                  visibleLayers: Set<String>): WorkspaceTurnStylePreview? =
+        runtime.read().runtime.capture?.takeIf { it.state == expectedState }?.let { capture ->
+            WorkspaceTurnStylePreview(capture, documentCommands, pose, visibleLayers)
+        }
+
     /** Installs a source the presentation analysed itself, when it holds one. */
     internal fun attachCurrentWorkspace() {
         if (presentation.importedSource(presentation.current()) != null) runBlocking { importedPsd() }

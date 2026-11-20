@@ -37,6 +37,7 @@ class ArchivedPresetScenario {
                 val artifact = requireNotNull(BundledAlgorithmArtifacts.find(instance.type, instance.version))
                 // Same executable, a different immutable package identity. Hair keeps its historical manifest omission.
                 val manifest = artifact.manifest.copy(name = "Archived regression fixture: ${instance.type}",
+                    version = if (instance.type == "hair") "1.0.64" else artifact.manifest.version,
                     algorithms = artifact.manifest.algorithms.map {
                         if (instance.type == "hair") it.copy(requires = setOf("rig.scaffold")) else it
                     })

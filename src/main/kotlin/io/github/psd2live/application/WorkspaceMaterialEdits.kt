@@ -180,13 +180,13 @@ internal object WorkspaceMaterialEdits {
      */
     fun addLinked(document: WorkspaceDocument, fileName: String,
                   folderName: String = fileName.substringBeforeLast('.').ifEmpty { fileName },
-                  checkCancelled: () -> Unit = {}, only: Set<String>? = null): WorkspaceDocument {
+                  checkCancelled: () -> Unit = {}, only: Set<String>? = null, sourcePath: String = ""): WorkspaceDocument {
         val layers = document.source.layers.filter { it.raster.width > 0 && it.raster.height > 0 && (only == null || it.id.raw in only) }
         if (layers.isEmpty()) return document
         val art = if (only == null) document.source else WorkspaceSourceArt(document.source.widthPx, document.source.heightPx, layers, document.source.groups)
         // Entries come in the layers' order; a reference layer's material places as a reference again.
         val entries = WorkspaceMaterialFiles.layered(art, listOf(WorkspaceMaterialFiles.name(folderName, "source")), fileName, checkCancelled)
-            .mapIndexed { index, entry -> entry.copy(fileFolder = 0, reference = layers.getOrNull(index)?.id?.raw in document.layout.referenceLayerIds) }
+            .mapIndexed { index, entry -> entry.copy(fileFolder = 0, sourcePath = sourcePath, reference = layers.getOrNull(index)?.id?.raw in document.layout.referenceLayerIds) }
         val before = document.layout.materials.items.size
         val added = add(document, entries, null, checkCancelled)
         val items = added.layout.materials.items.drop(before)

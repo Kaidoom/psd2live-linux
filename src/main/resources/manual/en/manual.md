@@ -724,6 +724,7 @@ The chosen preset is remembered, and PSDs imported later from the menu, recent f
 
 @@ psd-re-import | Re-import PSDs
 Right-click the original PSD folder in **Materials**, choose **Reimport PSD**, and select the updated file. Review any uncertain matches or changes to layer bounds. Leave **Fit updated artwork to existing canvas bounds** off to use the updated PSD placement and remesh changed layers. Enable it to keep their current canvas rectangles.
+The import guide can split a source layer into independent project layers. To update that artwork from the original PSD later, keep the layer unsplit in the guide. For independent parts that each need a PSD link, give them separate layers in Photoshop before importing.
 ## Replacing one layer's pixels
 1. Select the layer to update on the canvas or in the layer list.
 2. Right-click the replacement material and choose **Replace selected layer's image**. A matching PSD layer uses its source placement. Other images are centred on the selected layer.
@@ -747,6 +748,8 @@ The **Model presets** panel decides in one place what is generated automatically
 | Physics and simulation | Front hair and back hair each choose **Simulation** / **Classic sway** / **Off**; **Clothing** simulation (acts only on loose parts); jelly eyes; auto Pin physics weights |
 With **Selected only** ticked, the physics and simulation presets act only on the selected layers.
 *> It is best to generate with the defaults first and preview; when you need to adjust, change one item at a time so you can see what each does. Texture atlas settings are not here but in the export window.
+
+With custom `MOUTH_CLOSE` artwork, open **Closed-mouth Visibility** in the fitted mouth settings. Add or move keys on the Mouth Open axis, select a key to set its opacity, then choose **Apply**. For a later fade, set 100% at 0.20 and 0% at 0.25. The open artwork fades in over the same interval. Mouth deformation keys stay in place.
 
 @@ update-generated-rig | Update Generated Rig
 Actions such as turning on hair simulation, enabling the skeleton or splitting layers merge your edits onto the generated result of that moment and pin it, so that upgrading the program never quietly changes your model. When you want the improvements of a newer generator, run **Update Generated Rig** yourself.
@@ -1886,10 +1889,13 @@ The same model can be exported directly for VTube Studio, the web, Unity and so 
 ## Runtimes and players
 | Menu item | Output | Main limits |
 |---|---|---|
-| VTube Studio… | The full set of moc3 files + `.vtube.json` | Face tracking maps only standard parameters; one hotkey per motion and one toggle hotkey per expression |
+| VTube Studio… | The full set of moc3 files, `.vtube.json`, and a model selection icon | Face tracking maps standard parameters. Motion and expression hotkeys are ready to assign. |
 | PSD2Live runtime rig… | `.p2lrt` | Without the data the editor attaches; optional compression, stripping names and so on |
 | Web player… | `index.html`, the player script, the WebAssembly runtime and `.p2lrt` | Must be accessed over http |
 | Unity prefab… | `.p2lunity`, textures and an install script | Needs Unity 6.0 or later; parameters are baked into Blend Shapes and combinations are approximated additively; masks and physics are not written |
+
+Place the entire VTube Studio export folder in `Live2DModels` and restart VTube Studio. The model list shows an icon rendered from the default pose. Assign keyboard shortcuts and on-screen buttons in the hotkey settings.
+
 ## Layered PSD
 - **PSD at a pose…**: poses the model by a motion's moment or by given parameter values, one layer per visible mesh; deformers and parameters are not kept.
 - **Source PSD…** (with generated layers): exports the project's source layers, optionally at 1× or an upscaled ratio, and can include the automatically split layers, so you can go back to your drawing software for fine touch-ups (also available with {key:REEXPORT_PSD}).

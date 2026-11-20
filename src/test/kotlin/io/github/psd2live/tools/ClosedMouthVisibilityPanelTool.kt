@@ -88,7 +88,7 @@ class ClosedMouthVisibilityPanelTool {
                                 assertNull(committed, "Editing the curve stays local until Apply")
                                 scene.render(time + 16_000_000).use { File(file.parentFile, "edited.png").writeBytes(requireNotNull(it.encodeToData()).bytes) }
                                 click(446f, 230f)
-                                val curve = io.github.psd2live.algorithms.binding.ClosedMouthVisibility.fromConfig(assertNotNull(committed))!!
+                                val curve = io.github.psd2live.core.modifier.ClosedMouthVisibility.fromConfig(assertNotNull(committed))!!
                                 assertEquals(4, curve.points.size)
                                 assertEquals(1f, curve.points.first().opacity, .0001f, "Do not multiply source alpha twice")
                                 assertEquals(.2f, curve.points[1].open, .005f)
@@ -96,7 +96,7 @@ class ClosedMouthVisibilityPanelTool {
                                 assertEquals(.25f, curve.points[2].open, .005f)
                                 assertEquals(0f, curve.points[2].opacity, .01f)
                                 // Compaction may remove an all-constant opacity axis. The saved curve must stay editable.
-                                val constant = io.github.psd2live.algorithms.binding.ClosedMouthVisibility.Default.setOpacity(.05f, 1f).setOpacity(1f, 1f)
+                                val constant = io.github.psd2live.core.modifier.ClosedMouthVisibility.Default.setOpacity(.05f, 1f).setOpacity(1f, 1f)
                                 displayed = mouth.copy(config = JsonObject(mouth.config + ("closedMouthVisibility" to constant.toJson())))
                                 val compacted = model.rig.puppet.copy(drawables = model.rig.puppet.drawables.map { drawable ->
                                     if (model.rig.ownLayerIdByDrawableId[drawable.id.raw] == "closed-mouth")

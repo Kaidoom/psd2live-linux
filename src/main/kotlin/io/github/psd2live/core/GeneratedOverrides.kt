@@ -141,7 +141,7 @@ internal object GeneratedOverrides {
 				if (generator.startsWith("modifier:")) {
 					put("merge_mode", GeometryEditIntent.mode(command))
 					put("geometry_binding", geometryBinding(model, kind, id))
-					if (keyed !== model) put("insert_keys", true)
+					if (keyed !== model) recordKeyInsertion(model, kind, id)
 				}
 				put("key", JsonObject(key.mapValues { JsonPrimitive(it.value) }))
 				put("base", JsonArray(base.map(::JsonPrimitive)))
@@ -232,7 +232,7 @@ internal object GeneratedOverrides {
 			put("key", JsonObject(key.mapValues { JsonPrimitive(it.value) }))
 			put("base", JsonArray(base.map(::JsonPrimitive)))
 			put("points", JsonArray(points.map(::JsonPrimitive)))
-            if (insertKeys) put("insert_keys", true)
+            if (insertKeys) recordKeyInsertion(shown, kind, id)
             if (generator.startsWith("modifier:")) {
                 put("merge_mode", mode); put("geometry_binding", geometryBinding(shown, kind, id))
             }
@@ -463,13 +463,17 @@ internal object GeneratedOverrides {
 		return Outcome(model.withReplacedChannelGrids(owner, ChannelGrids(grids.gridsByChannel + (channel to next))), issues)
 	}
 
-    /** Prepare sampled geometry independently of opacity, including a closed drawing's first Open axis. */
-    internal fun withGeometryKeys(source: PuppetModel, kind: String, id: String, key: Map<String, Float>): PuppetModel {
-        if (GeometryKeyforms.canPrepare(source, kind, id, key)) return GeometryKeyforms.prepare(source, kind, id, key)
-        val axes = if (kind == "warp") warp(source, id)?.geometryGrid?.axes
-            else if (kind == "rotation") (source.deformers.firstOrNull { it.id.raw == id } as? Deformer.Rotation)?.geometryGrid?.axes
-            else source.drawables.firstOrNull { it.id.raw == id }?.geometryGrid?.axes
-        var result = source
+    private fun JsonObjectBuilder.recordKeyInsertion(source: PuppetModel, kind: String, id: String) {
+        put("insert_keys", true)
+        val axes = GeometryKeyforms.axes(source, kind, id).orEmpty().map { it.parameterId.raw }
+        put("source_axes", JsonArray(axes.map(::JsonPrimitive)))
+    }
+
+    internal fun withGeometryKeys(source: PuppetModel, kind: String, id: String, key: Map<String, Float>, bindMissingAxes: Boolean = true): PuppetModel {
+        var result = if (bindMissingAxes && kind in setOf("mesh", "warp"))
+            GeometryKeyforms.bindMissingAxes(source, kind, id, key) else source
+        val axes = if (kind == "rotation") (result.deformers.firstOrNull { it.id.raw == id } as? Deformer.Rotation)?.geometryGrid?.axes
+            else GeometryKeyforms.axes(result, kind, id)
         for (axis in axes.orEmpty()) {
             val value = key[axis.parameterId.raw] ?: continue
             if (axis.keys.any { abs(it - value) < org.umamo.runtime.eval.EPS_KEY }) continue
@@ -533,7 +537,7 @@ internal object GeneratedOverrides {
 	 * Applies [command] to a generated [model]. A model without the generated cell (before the generators ran,
 	 * or after the generator was removed or reshaped) is left unchanged; the override then reports as orphaned.
 	 */
-	fun apply(model: PuppetModel, command: JsonObject): Outcome {
+	fun apply(model: PuppetModel, command: JsonObject, legacyAxisInsertion: Boolean = false): Outcome {
 		val target = command.getValue("target").jsonPrimitive.content
 		val kind = target.substringBefore(':')
 		val id = target.substringAfter(':')
@@ -553,18 +557,18 @@ internal object GeneratedOverrides {
         if (preserveChildren && (kind != "warp" || command["children_binding"] != childrenBinding(model, id) ||
                 command["geometry_binding"]?.jsonPrimitive?.content != geometryBinding(model, kind, id)))
             return orphaned(GeneratedOverrideOrphanReason.SHAPE_MISMATCH)
-        // Fedora projects saved before 3.8.2 describe materialized cells with source_axes.
-        // Keep their atomic preparation and three-way merge semantics without migrating history.
-        val sourceAxes = command["source_axes"]?.jsonArray
-        val keyed = if (sourceAxes != null) {
-            val existing = GeometryKeyforms.axes(model, kind, id).mapTo(HashSet()) { it.parameterId.raw }
-            if (sourceAxes.any { it.jsonPrimitive.content !in existing })
-                return orphaned(GeneratedOverrideOrphanReason.MISSING_KEYFORM)
-            try { GeometryKeyforms.prepare(model, kind, id, key) } catch (_: IllegalArgumentException) {
-                return orphaned(GeneratedOverrideOrphanReason.MISSING_KEYFORM)
+		val sourceAxes = command["source_axes"]?.jsonArray
+        // Early Fedora sculpts used source_axes alone to request insertion.
+        val keyed = if (sourceAxes != null || command["insert_keys"]?.jsonPrimitive?.booleanOrNull == true) {
+            // Only recreate axes the artist introduced. A disappearing generator-owned axis or mesh orphans the edit.
+            if (sourceAxes != null) {
+                val currentAxes = GeometryKeyforms.axes(model, kind, id)?.map { it.parameterId.raw }
+                if (currentAxes == null || sourceAxes.any { it.jsonPrimitive.content !in currentAxes })
+                    return orphaned(GeneratedOverrideOrphanReason.MISSING_KEYFORM)
             }
-        } else if (command["insert_keys"]?.jsonPrimitive?.booleanOrNull == true) {
-			try { withGeometryKeys(model, kind, id, key) } catch (_: IllegalArgumentException) {
+			val bindMissing = sourceAxes != null || (legacyAxisInsertion &&
+                command["geometry_binding"]?.jsonPrimitive?.content == geometryBinding(model, kind, id))
+            try { withGeometryKeys(model, kind, id, key, bindMissingAxes = bindMissing) } catch (_: IllegalArgumentException) {
 				return orphaned(GeneratedOverrideOrphanReason.MISSING_KEYFORM)
 			}
 		} else model

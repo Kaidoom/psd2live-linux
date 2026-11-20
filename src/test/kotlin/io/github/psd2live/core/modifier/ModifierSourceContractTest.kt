@@ -24,9 +24,9 @@ class ModifierSourceContractTest {
     }
 
     private fun archivedHair() = requireNotNull(BundledAlgorithmArtifacts.find("hair", 1)).let { artifact ->
-        InstalledModifierPlugin(artifact.manifest.copy(algorithms = artifact.manifest.algorithms.map {
+        InstalledModifierPlugin(artifact.manifest.copy(version = "1.0.64", algorithms = artifact.manifest.algorithms.map {
             it.copy(requires = setOf("rig.scaffold"))
-        }), artifact.reference.copy(digest = "f".repeat(64)), temp, true)
+        }), artifact.reference.copy(version = "1.0.64", digest = "f".repeat(64)), temp, true)
     }
 
     private fun adapter(entry: InstalledModifierPlugin): RigModifierDefinition {

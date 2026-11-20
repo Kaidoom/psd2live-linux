@@ -50,10 +50,10 @@ class PSD2LivePipeline {
         modifierBase = null
     }
     /** Carry content-keyed intermediates between isolated candidates, never a mutable document or worker. */
-    internal fun reuseModifierInputs(current: RigPreviewModel?) {
+    internal fun reuseModifierInputs(current: RigPreviewModel?, shareOwner: Boolean = true) {
         if (modifierBuildOwner.isClosed) modifierBuildOwner = ModifierBuildCacheOwner()
         current ?: return
-        current.modifierBuildOwner?.takeUnless { it.isClosed }?.let { modifierBuildOwner = it }
+        if (shareOwner) current.modifierBuildOwner?.takeUnless { it.isClosed }?.let { modifierBuildOwner = it }
         if (modifierBuildOwner.isClosed) modifierBuildOwner = ModifierBuildCacheOwner()
         current.modifierEvaluation?.let { modifierCache.snapshot = it }
         current.modifierBaseSnapshot?.let { modifierBase = it }
@@ -169,7 +169,8 @@ class PSD2LivePipeline {
         val (effectiveAnalysis, fullAtlas, generated) = if (ordinaryMaterials && config.rigEdits == RigEditOverlay.Empty)
             generateWithAtlasEncoding(inputs, config, progress)
         else generatedBase(inputs, config, progress, materialsOnly = ordinaryMaterials)
-        val baseRig = if (ordinaryMaterials) io.github.psd2live.core.modifier.RigOrdinaryMaterials.of(generated, effectiveAnalysis) else generated
+        val baseRig = if (ordinaryMaterials)
+            io.github.psd2live.core.modifier.RigOrdinaryMaterials.of(generated, effectiveAnalysis, config.layerVisibility) else generated
 		// The base packs superseded layers (the originals of a split) too; once no mesh samples them the model
 		// packs only the layers it shows, as exports do.
 		val (atlas, rig) = RigLayerDeletion.compact(fullAtlas, effectiveAnalysis, effectiveAnalysis,

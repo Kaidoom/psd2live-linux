@@ -175,7 +175,8 @@ private fun FrameWindowScope.PSD2LiveAppContent(
 	val baking by viewModel.simulationBaking.collectAsState()
 	val download by viewModel.modelDownloadState.collectAsState()
 	val projectProgress by viewModel.projectProgress.collectAsState()
-	val task = io.github.psd2live.ui.state.taskProgress(state, baking, download, projectProgress)
+	val guideProgress = if (AppPage.PSD_GUIDE in viewModel.openPages || viewModel.psdGuide.saving) viewModel.psdGuide.taskProgress else null
+	val task = io.github.psd2live.ui.state.taskProgress(state, baking, download, projectProgress, guideProgress)
 	var tutorial by remember { mutableStateOf(InteractiveTutorialState()) }
 	val tutorialTargets = rememberTutorialTargetRegistry()
 	// The performance overlay draws outside Compose, in the theme's colours.
@@ -316,7 +317,9 @@ private fun FrameWindowScope.PSD2LiveAppContent(
 			if (!isBusy) {
 				val selected = NativeFilePicker.choosePsdFile(window, state.inputPath)
 				if (!selected.isNullOrBlank()) {
-					viewModel.withSavedChanges { viewModel.setInputPath(selected); viewModel.analyze(discardUnsaved = true) }
+					val path = Path.of(selected)
+                    if (path.fileName.toString().endsWith(".psd", true)) viewModel.openPsdGuide(path)
+                    else viewModel.withSavedChanges { viewModel.setInputPath(selected); viewModel.analyze(discardUnsaved = true) }
 				}
 			}
 		}
@@ -341,7 +344,7 @@ private fun FrameWindowScope.PSD2LiveAppContent(
 		}
         val onReanalyzeAction = {
 			if (hasInput && !isBusy) {
-				viewModel.withSavedChanges { viewModel.analyze(discardUnsaved = true) }
+				viewModel.withSavedChanges { viewModel.analyze(discardUnsaved = true, checkImportedMeshSplits = false) }
 			}
 		}
 
@@ -603,6 +606,7 @@ private fun FrameWindowScope.PSD2LiveAppContent(
 						)
 					}
 					AppTitleBar(
+						canScanMeshSplits = state.canCheckMeshSplits,
 						window = window,
 						windowState = windowState,
 						isBusy = isBusy,

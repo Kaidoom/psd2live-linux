@@ -1,7 +1,6 @@
 package io.github.psd2live.core.modifier
 
 import io.github.psd2live.algorithms.binding.BindingAxes
-import io.github.psd2live.algorithms.binding.ClosedMouthVisibility
 import org.umamo.runtime.eval.scalarAt
 import org.umamo.runtime.model.*
 import kotlin.test.*

@@ -95,13 +95,13 @@ internal object MaterializedMeshRebuild {
             fun migrate(axis: SimBakedAxis): SimBakedAxis {
                 val previous = axis.offsets[id] ?: return axis
                 require(previous.all { it.size == count * 2 }) { "Simulation bake has a stale mesh topology" }
-                return SimBakedAxis(axis.parameter, axis.keys, axis.offsets + (id to previous.map { values ->
+                return axis.withMeshOffsets(axis.offsets + (id to previous.map { values ->
                     checkpoint()
                     RasterMeshJournal.remapOffsets(values, sources)
                 }))
             }
             sim.copy(bake = SimBakeResult.fromJson(bake.withGeometry(bake.vertexCounts + (id to sources.size), bake.statics.map(::migrate),
-                bake.modes.map { SimBakedMode(migrate(it.axis), it.amplitude, it.energy) }).toJson()))
+                bake.modes.map { it.withAxis(migrate(it.axis)) }).toJson()))
         }
     })
 }

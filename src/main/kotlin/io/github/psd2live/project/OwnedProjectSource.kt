@@ -7,7 +7,7 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 /** Immutable import bytes owned by the workspace; external paths are presentation/provenance only. */
-internal data class OwnedProjectSource(val path: Path, val descriptor: JsonObject) {
+internal data class OwnedProjectSource(val path: Path, val descriptor: JsonObject, val originalPath: Path) {
     val auxiliary: JsonObject get() = buildJsonObject { put(KEY, descriptor) }
 
     companion object {
@@ -23,7 +23,8 @@ internal data class OwnedProjectSource(val path: Path, val descriptor: JsonObjec
             val temporary = Files.createTempFile(directory, "import-", ".$format")
             try {
                 val digest = MessageDigest.getInstance("SHA-256")
-                Files.newInputStream(input).use { source -> Files.newOutputStream(temporary).use { target ->
+                val original = input.toRealPath()
+                Files.newInputStream(original).use { source -> Files.newOutputStream(temporary).use { target ->
                     val bytes = ByteArray(64 * 1024)
                     while (true) {
                         val count = source.read(bytes)
@@ -36,7 +37,7 @@ internal data class OwnedProjectSource(val path: Path, val descriptor: JsonObjec
                 val owned = directory.resolve("$hash.$format")
                 if (!Files.isRegularFile(owned)) Files.move(temporary, owned, StandardCopyOption.ATOMIC_MOVE)
                 val descriptor = buildJsonObject { put("format", format); put("sha256", hash) }
-                return OwnedProjectSource(owned, descriptor)
+                return OwnedProjectSource(owned, descriptor, original)
             } finally { Files.deleteIfExists(temporary) }
         }
 

@@ -26,7 +26,7 @@ internal object WorkspaceModifierEdits {
 
     fun apply(operation: WorkspaceDocumentOperation, document: WorkspaceDocument, model: RigPreviewModel,
               work: WorkspaceRasterWork = WorkspaceRasterWork.Direct, draftInputs: WorkspaceModifierDraftInputs? = null): WorkspaceDocument {
-        if (operation.operation == "modifier_initialize") return WorkspacePresetInitialize.apply(document, operation.request, work)
+        if (operation.operation == "modifier_initialize") return WorkspacePresetInitialize.apply(document, operation.request, work, draftInputs)
         if (operation.operation == "modifier_convert") return WorkspaceModifierConversion.convert(document, model, work)
         if (operation.operation == "modifier_switch") return WorkspacePresetSwitch.apply(
             document,
@@ -34,6 +34,7 @@ internal object WorkspaceModifierEdits {
             work,
             model,
             operation.request["richness"]?.jsonPrimitive?.contentOrNull,
+            draftInputs,
         )
         val stack = RigModifierStack.fromJson(requireNotNull(document.rigEdits.modifierStack) {
             "Convert legacy presets before editing a modifier stack"
@@ -57,17 +58,7 @@ internal object WorkspaceModifierEdits {
                     add(candidate, JsonObject(entry.jsonObject + ("group" to JsonPrimitive(group))), null)
                 }
             }
-            "modifier_update" -> stack.update(requireNotNull(id)) { instance ->
-                request["plugin"]?.let { require(Json.decodeFromJsonElement(ModifierPluginReference.serializer(), it) == instance.plugin) { "Modifier plugin identity does not match" } }
-                request["type"]?.let { require(it.jsonPrimitive.content == instance.type) { "Modifier type does not match" } }
-                val config = request.getValue("config").jsonObject
-                // Invalid requests must not persist configurations that the public stack schema cannot describe.
-                // Runtime artwork incompatibility is isolated later, when the valid configuration is evaluated.
-                if (instance.type in WorkspaceModifierSchemas.types)
-                    validateOperationSchema(config, WorkspaceModifierSchemas.configuration(instance.type), "config")
-                captureParameterProviders(instance.copy(config = JsonObject(
-                    instance.config.filterKeys { it == "automatic_weights" } + config)), model)
-            }
+            "modifier_update" -> updateConfiguration(stack, request, model)
             "modifier_rebind" -> {
                 val plugin = Json.decodeFromJsonElement(ModifierPluginReference.serializer(), request.getValue("plugin"))
                 val version = request["version"]?.jsonPrimitive?.intOrNull
@@ -120,6 +111,19 @@ internal object WorkspaceModifierEdits {
         }
         return if (prepared == stack) document else candidate.copy(rigEdits = candidate.rigEdits.copy(modifierStack = prepared.toJson()))
     }
+
+    /** A configuration change shared by a private render and a complete document edit. */
+    fun updateConfiguration(stack: RigModifierStack, request: JsonObject, model: RigPreviewModel): RigModifierStack =
+        stack.update(requireNotNull(request["id"]?.jsonPrimitive?.content)) { instance ->
+            request["plugin"]?.let { require(Json.decodeFromJsonElement(ModifierPluginReference.serializer(), it) == instance.plugin) { "Modifier plugin identity does not match" } }
+            request["type"]?.let { require(it.jsonPrimitive.content == instance.type) { "Modifier type does not match" } }
+            val config = request.getValue("config").jsonObject
+            // Validate the public configuration. The evaluator isolates artwork-specific failures later.
+            if (instance.type in WorkspaceModifierSchemas.types)
+                validateOperationSchema(config, WorkspaceModifierSchemas.configuration(instance.type), "config")
+            captureParameterProviders(instance.copy(config = JsonObject(
+                instance.config.filterKeys { it == "automatic_weights" } + config)), model)
+        }
 
     /** Moving a producer supersedes its captured group order while keeping ordinary groups in their slots. */
     private fun movePhysicsOrder(document: WorkspaceDocument, model: RigPreviewModel, stack: RigModifierStack, moved: String): WorkspaceDocument {

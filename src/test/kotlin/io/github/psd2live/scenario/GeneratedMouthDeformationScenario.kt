@@ -2,6 +2,7 @@ package io.github.psd2live.scenario
 
 import io.github.psd2live.application.*
 import io.github.psd2live.core.*
+import io.github.psd2live.ui.keyformAxesFor
 import io.github.psd2live.core.modifier.RigModifierStack
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
@@ -29,12 +30,12 @@ class GeneratedMouthDeformationScenario {
         val id = model.rig.ownLayerIdByDrawableId.entries.first { it.value == "mouth" }.key
         val defaults = puppet.parameters.associate { it.id to it.default }
         for (value in stops + Math.nextUp(.25f)) {
-            assertTrue(nearestKeyPose(GeometryKeyforms.editingAxes(puppet, "mesh", id), mapOf(open to value), defaults).isEmpty(),
+            assertTrue(nearestKeyPose(puppet.keyformAxesFor("mesh", id), mapOf(open to value), defaults).isEmpty(),
                 "An existing geometry key must not snap because an opacity track has different keys: $value")
         }
         val marked = ParameterKeyEdits.apply(puppet, req("op" to "parameter_keys", "parameter" to open.raw,
             "action" to "add", "values" to listOf(.4f)))
-        assertTrue(nearestKeyPose(GeometryKeyforms.editingAxes(marked, "mesh", id), mapOf(open to .4f), defaults).isEmpty())
+        assertTrue(nearestKeyPose(marked.keyformAxesFor("mesh", id), mapOf(open to .4f), defaults).isEmpty())
     }
 
     @Test fun savedFedoraSourceAxesSculptReplaysAndReopensWithoutMigration(): Unit = runBlocking {
@@ -42,10 +43,10 @@ class GeneratedMouthDeformationScenario {
         val model = WorkspacePreviewBuilder().build(document)
         val original = model.rig.puppet
         val id = model.rig.ownLayerIdByDrawableId.entries.first { it.value == "closed-mouth" }.key
-        val axes = GeometryKeyforms.axes(original, "mesh", id)
+        val axes = requireNotNull(GeometryKeyforms.axes(original, "mesh", id))
         assertTrue(axes.none { it.parameterId == open }, "Exercise the old first-Open-axis record")
         val key = axes.associate { it.parameterId.raw to original.parameters.single { p -> p.id == it.parameterId }.default } + (open.raw to .25f)
-        val prepared = GeometryKeyforms.prepare(original, "mesh", id, key)
+        val prepared = GeneratedOverrides.withGeometryKeys(original, "mesh", id, key)
         val grid = prepared.drawables.single { it.id.raw == id }.geometryGrid!!
         val form = grid.cells.single { cell -> grid.axes.indices.all { grid.axes[it].keys[cell.coordinate[it]] == key.getValue(grid.axes[it].parameterId.raw) } }.form
         val points = form.positionDeltas.copyOf().also { it[0] += .02f }

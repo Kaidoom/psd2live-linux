@@ -185,7 +185,8 @@ class PSD2LiveViewModel : AutoCloseable {
         val layerName: String,
         val plan: MeshComponentSplit.Plan,
         val preview: RigPreviewModel,
-        val expected: io.github.psd2live.project.WorkspaceProjectSnapshot? = null,
+        val expected: io.github.psd2live.project.WorkspaceProjectSnapshot?,
+        val fromImport: Boolean,
     )
 
     internal data class LayerSplitDecision(
@@ -194,7 +195,7 @@ class PSD2LiveViewModel : AutoCloseable {
         val sides: List<Side>,
     )
 
-    /** Several layers that can be split by mesh, offered together: after a layer import, or from the Tools menu. */
+    /** Several layers that can be split by mesh, offered together: after a layer import, or from the Model menu. */
     internal data class MeshSplitBatchOffer(
         val preview: RigPreviewModel,
         val splits: List<MeshSplitOffer>,
@@ -1099,16 +1100,19 @@ class PSD2LiveViewModel : AutoCloseable {
     /** False while a live simulation needs frames, so the paused preview keeps pumping. */
     val previewSettled: Boolean get() = pausedPhysicsSettled && (_state.value.simulationPreviewId == null || _simulationStatus.value is SimulationStatus.Failed)
 
-    private val meshSplitQueue = ArrayDeque<String>()
-    private val manualMeshSplitRequests = mutableSetOf<String>()
+    private enum class MeshSplitTrigger { IMPORT, MESH_SETTINGS, LAYER_MENU, MODEL_MENU }
+
+    /** A missing layer list means the whole model. An import always supplies its own layer IDs. */
+    private data class MeshSplitRequest(val trigger: MeshSplitTrigger, val layerIds: List<String>? = null)
+
+    private val meshSplitQueue = ArrayDeque<MeshSplitRequest>()
+    private var activeMeshSplitRequest: MeshSplitRequest? = null
     private val meshSplitCheck by lazy { MeshSplitCheck(scope) }
     private val meshSplitChecking get() = meshSplitCheck.running
     private var meshSplitApplying = false
     /** Start presets being brought to the model: splits wait for them, since they replace the model. */
     private var presetsApplying = false
     private val importPresetContinuation = ImportPresetContinuation()
-    /** Model > Split Layers by Mesh asked for while a split or the presets were still being applied. */
-    private var meshSplitScanQueued = false
     private val meshSplitsBlocked get() = meshSplitChecking || meshSplitApplying || presetsApplying ||
         pendingMeshSplit != null || pendingMeshSplitBatch != null
 
@@ -1148,8 +1152,7 @@ class PSD2LiveViewModel : AutoCloseable {
                     pendingMeshSplit = null
                     pendingMeshSplitBatch = null
                     meshSplitQueue.clear()
-                    manualMeshSplitRequests.clear()
-                    meshSplitScanQueued = false
+                    activeMeshSplitRequest = null
                 }
                 if (next.activeWorkspace.id != current.activeWorkspace.id || next.projectOpenGeneration != current.projectOpenGeneration)
                     next = next.copy(simulationPreviewId = null)
@@ -1216,8 +1219,7 @@ class PSD2LiveViewModel : AutoCloseable {
                 pendingMeshSplit = null
                 pendingMeshSplitBatch = null
                 meshSplitQueue.clear()
-                manualMeshSplitRequests.clear()
-                meshSplitScanQueued = false
+                activeMeshSplitRequest = null
             }
             val logged = trackProjectChanges(_state.value, next).withStateChangeLog(_state.value)
             _state.value = logged
@@ -1363,77 +1365,30 @@ class PSD2LiveViewModel : AutoCloseable {
         }
     }
 
-    /** Offer one source split at a time after the new mesh is actually in the preview. */
-    internal fun offerMeshSplit(layerIds: List<String>) {
-        if (layerIds.size > 1) {
-            offerImportMeshSplit(layerIds)
-            return
-        }
-        layerIds.forEach { id ->
-            if (id !in meshSplitQueue && pendingMeshSplit?.layerId != id) meshSplitQueue.addLast(id)
-        }
-        checkNextMeshSplit()
+    private fun offerImportMeshSplit(layerIds: List<String>) {
+        if (layerIds.isEmpty() || !_state.value.autoDetectMeshSplitsOnImport) return
+        enqueueMeshSplit(MeshSplitRequest(MeshSplitTrigger.IMPORT, layerIds))
     }
 
-    /** A layer import with several new layers: offers their splits, alone or together. */
-    internal fun offerImportMeshSplit(layerIds: List<String>) {
-        if (!AppSettings.autoDetectMeshSplitsOnImport) return
-        if (meshSplitsBlocked) return
-        val preview = _state.value.previewModel ?: return
-        meshSplitCheck.start(
-            action = { detectMeshSplits(preview, layerIds) },
-            completed = { offers ->
-                if (_state.value.previewModel === preview) when {
-                    offers.size == 1 -> pendingMeshSplit = offers.single()
-                    offers.size > 1 -> pendingMeshSplitBatch = MeshSplitBatchOffer(preview, offers)
-                } else if (importPresetContinuation.waiting) meshSplitScanQueued = true
-            },
-            failed = { reportMeshSplitCheckFailure(it) },
-            finished = { resumeMeshSplits() },
-        )
+    private fun offerMeshSplitAfterMeshSettings(layerId: String) =
+        enqueueMeshSplit(MeshSplitRequest(MeshSplitTrigger.MESH_SETTINGS, listOf(layerId)))
+
+    private fun enqueueMeshSplit(request: MeshSplitRequest) {
+        if (request == activeMeshSplitRequest || request in meshSplitQueue) return
+        meshSplitQueue.addLast(request)
+        resumeMeshSplits()
     }
 
-    /** Tools > split layers by mesh: scans every source layer and offers the ones whose mesh falls apart. */
-    internal fun requestMeshSplitScan() {
-        // An open offer or a running scan already answers the request.
-        if (meshSplitChecking || pendingMeshSplit != null || pendingMeshSplitBatch != null) return
-        if (meshSplitApplying || presetsApplying) {
-            // Waits for the model the presets or the split are making, rather than dropping the click.
-            meshSplitScanQueued = true
-            setStatusText(tr("start.splits.waiting"))
-            return
-        }
-        meshSplitScanQueued = false
-        val preview = _state.value.previewModel ?: return
-        if (preview.config.rigEdits.importedCmo3 != null) {
-            setErrorMessage(tr("editor.meshSplit.authored"))
-            return
-        }
-        setStatusText(tr("start.splits.scanning"))
-        meshSplitCheck.start(
-            action = { detectMeshSplits(preview, preview.analysis.source.layers.map { it.id.raw }) },
-            completed = { offers ->
-                if (_state.value.previewModel === preview) when {
-                    offers.isEmpty() -> setStatusText(tr("start.splits.none"))
-                    offers.size == 1 -> pendingMeshSplit = offers.single()
-                    else -> pendingMeshSplitBatch = MeshSplitBatchOffer(preview, offers)
-                } else if (importPresetContinuation.waiting) meshSplitScanQueued = true
-            },
-            failed = { reportMeshSplitCheckFailure(it) },
-            finished = { resumeMeshSplits() },
-        )
-    }
+    /** Scan all source layers on demand from the Model menu. */
+    internal fun requestMeshSplitScan() = enqueueMeshSplit(MeshSplitRequest(MeshSplitTrigger.MODEL_MENU))
 
     private fun reportMeshSplitCheckFailure(failure: Throwable) {
-        importPresetContinuation.clear()
-        meshSplitQueue.clear()
-        manualMeshSplitRequests.clear()
         val message = tr("error.meshSplitCheckFailed", workspaceFailureMessage(failure))
         updateState { it.withLog(message, level = LogLevel.ERROR, tag = "MeshSplit").copy(errorMessage = message) }
     }
 
     /** The source layers among [layerIds] whose mesh falls apart into several pieces and can still be split. */
-    private suspend fun detectMeshSplits(preview: RigPreviewModel, layerIds: List<String>): List<MeshSplitOffer> {
+    private suspend fun detectMeshSplits(preview: RigPreviewModel, layerIds: List<String>, fromImport: Boolean): List<MeshSplitOffer> {
         val expected = workspaceBackend?.snapshot()
         return withContext(Dispatchers.Default) {
             val context = kotlinx.coroutines.currentCoroutineContext()
@@ -1443,36 +1398,24 @@ class PSD2LiveViewModel : AutoCloseable {
                     ?: return@mapNotNull null
                 val source = preview.analysis.source.layers.firstOrNull { it.id.raw == id }
                     ?: preview.analysis.layers.first { it.source.id.raw == id }.source
-                MeshSplitOffer(id, source.name, plan, preview, expected)
+                MeshSplitOffer(id, source.name, plan, preview, expected, fromImport)
             }
         }
     }
 
-    /** Splits the layers chosen in the batch offer. */
     internal fun applyMeshSplitBatch(decisions: List<LayerSplitDecision>) {
         val offer = pendingMeshSplitBatch ?: return
-        meshSplitCheck.cancel()
-        pendingMeshSplitBatch = null
-        val valid = validSplitDecisions(decisions)
-        if (valid.isEmpty()) { resumeMeshSplits(); return }
-        meshSplitApplying = true
-        scope.launch {
-            try {
-                applyMeshSplits(offer.preview, valid)
-            } catch (failure: Throwable) {
-                importPresetContinuation.clear()
-                if (failure is kotlinx.coroutines.CancellationException) throw failure
-                setErrorMessage(workspaceFailureMessage(failure))
-            } finally {
-                meshSplitApplying = false
-                resumeMeshSplits()
-            }
-        }
+        confirmMeshSplits(offer.preview, decisions)
     }
 
     internal fun dismissMeshSplitBatch() {
-        meshSplitCheck.cancel()
+        if (pendingMeshSplitBatch != null) dismissMeshSplit()
+    }
+
+    internal fun dismissMeshSplit() {
+        pendingMeshSplit = null
         pendingMeshSplitBatch = null
+        activeMeshSplitRequest = null
         resumeMeshSplits()
     }
 
@@ -1525,6 +1468,13 @@ class PSD2LiveViewModel : AutoCloseable {
 
     /** Closes [page]'s tab, showing the workspace if it was the page shown. */
     internal fun closePage(page: AppPage) {
+        if (page == AppPage.PSD_GUIDE) {
+            if (!psdGuide.saving) {
+                showPage(page, PSD_GUIDE_CONTENT)
+                psdGuide.requestClose()
+            }
+            return
+        }
         openPages = openPages - page
         if (activePage == page) activePage = null
         if (page == AppPage.SETTINGS) endSettingsPage()
@@ -1697,9 +1647,8 @@ class PSD2LiveViewModel : AutoCloseable {
     }
 
     internal fun requestMeshSplit(layerId: String) {
-        if (pendingMeshSplit?.layerId == layerId) return
-        manualMeshSplitRequests += layerId
-        offerMeshSplit(listOf(layerId))
+        if (pendingMeshSplit?.layerId == layerId || pendingMeshSplitBatch?.splits?.any { it.layerId == layerId } == true) return
+        enqueueMeshSplit(MeshSplitRequest(MeshSplitTrigger.LAYER_MENU, listOf(layerId)))
     }
 
     internal data class DepthSplitOffer(
@@ -1776,6 +1725,16 @@ class PSD2LiveViewModel : AutoCloseable {
     internal fun confirmModifierAddition() = modifiers.confirmModifierAddition()
     internal fun modifierEditOrigin(): ModifierEditOrigin? = modifiers.modifierEditOrigin()
     internal fun modifierEditState(origin: ModifierEditOrigin? = null): String? = modifiers.modifierEditState(origin)
+    internal fun openTurnStylePreview(): io.github.psd2live.application.WorkspaceTurnStylePreview? {
+        val workspace = workspaceBackend as? DesktopWorkspace ?: return null
+        val current = _state.value
+        if (current.isBusy || current.workspaceEditBusy || current.editorDraftBusy) return null
+        val expected = modifierEditState() ?: return null
+        val pose = current.parameterValues + current.previewParameterValues.takeIf { current.previewLive }.orEmpty()
+        return workspace.host.turnStylePreview(expected, pose, current.effectiveVisibleLayerIds)
+            ?: run { setErrorMessage(tr("modifier.stale")); null }
+    }
+
     internal fun editModifier(operation: String, request: kotlinx.serialization.json.JsonObject, expectedState: String? = modifierEditState(),
                               onComplete: (String?) -> Unit = {}) = modifiers.editModifier(operation, request, expectedState, onComplete)
     internal fun editModifiers(operations: List<io.github.psd2live.application.WorkspaceDocumentOperation>, expectedState: String? = modifierEditState(),
@@ -2041,26 +2000,11 @@ class PSD2LiveViewModel : AutoCloseable {
         }
     }
 
-    internal fun dismissMeshSplit() {
-        pendingMeshSplit = null
-        resumeMeshSplits()
-    }
-
-    internal fun dismissAllMeshSplits() {
-        meshSplitCheck.cancel()
-        pendingMeshSplit = null
-        pendingMeshSplitBatch = null
-        meshSplitQueue.clear()
-        manualMeshSplitRequests.clear()
-        meshSplitScanQueued = false
-        resumeMeshSplits()
-    }
-
-    /** Runs what waited for a split or the presets to finish: a queued menu scan first, then queued layer checks. */
+    /** Run pending checks before applying the start presets to a newly imported PSD. */
     private fun resumeMeshSplits() {
-        if (meshSplitScanQueued) requestMeshSplitScan() else checkNextMeshSplit()
+        checkNextMeshSplit()
         val choices = importPresetContinuation.take(_state.value.projectOpenGeneration,
-            meshSplitsBlocked || meshSplitScanQueued || meshSplitQueue.isNotEmpty()) ?: return
+            meshSplitsBlocked || meshSplitQueue.isNotEmpty()) ?: return
         val expected = currentWorkspaceState() ?: return
         presetsApplying = true
         saveDocumentEdits(expected, tr("modifier.switch"), listOf(io.github.psd2live.application.WorkspaceDocumentOperation(
@@ -2077,43 +2021,73 @@ class PSD2LiveViewModel : AutoCloseable {
     }
 
     private fun checkNextMeshSplit() {
-        if (meshSplitsBlocked || meshSplitQueue.isEmpty()) return
-        val id = meshSplitQueue.removeFirst()
-        val preview = _state.value.previewModel ?: return
-        if (preview.config.rigEdits.importedCmo3 != null) {
-            if (id in manualMeshSplitRequests) setErrorMessage(tr("editor.meshSplit.authored"))
-            manualMeshSplitRequests -= id
-            checkNextMeshSplit()
+        if (meshSplitsBlocked) return
+        while (meshSplitQueue.isNotEmpty()) {
+            val request = meshSplitQueue.removeFirst()
+            val fromImport = request.trigger == MeshSplitTrigger.IMPORT
+            if (fromImport && !_state.value.autoDetectMeshSplitsOnImport) continue
+            val preview = _state.value.previewModel ?: continue
+            val manual = request.trigger == MeshSplitTrigger.MODEL_MENU || request.trigger == MeshSplitTrigger.LAYER_MENU
+            if (preview.config.rigEdits.importedCmo3 != null) {
+                if (manual) setErrorMessage(tr("editor.meshSplit.authored"))
+                continue
+            }
+            val layerIds = request.layerIds ?: preview.analysis.source.layers.map { it.id.raw }
+            val previousStatus = _state.value.statusText
+            val scanningStatus = tr("start.splits.scanning")
+            if (manual || fromImport) setStatusText(scanningStatus)
+            activeMeshSplitRequest = request
+            meshSplitCheck.start(
+                action = { detectMeshSplits(preview, layerIds, fromImport) },
+                completed = { offers ->
+                    if (_state.value.previewModel !== preview) {
+                        meshSplitQueue.addFirst(request)
+                    } else when {
+                        offers.size == 1 -> pendingMeshSplit = offers.single()
+                        offers.size > 1 -> pendingMeshSplitBatch = MeshSplitBatchOffer(preview, offers)
+                        request.trigger == MeshSplitTrigger.MODEL_MENU -> setStatusText(tr("start.splits.none"))
+                        request.trigger == MeshSplitTrigger.LAYER_MENU -> setStatusText(tr("editor.meshSplit.none"))
+                        else -> Unit
+                    }
+                },
+                failed = { reportMeshSplitCheckFailure(it) },
+                finished = {
+                    if (_state.value.statusText == scanningStatus) setStatusText(previousStatus)
+                    if (pendingMeshSplit == null && pendingMeshSplitBatch == null) activeMeshSplitRequest = null
+                    resumeMeshSplits()
+                },
+            )
             return
         }
-        meshSplitCheck.start(
-            action = { detectMeshSplits(preview, listOf(id)).singleOrNull() },
-            completed = { offer ->
-                if (_state.value.previewModel === preview && offer != null) pendingMeshSplit = offer
-                else if (id in manualMeshSplitRequests && _state.value.previewModel === preview)
-                    setErrorMessage(tr("editor.meshSplit.none"))
-                manualMeshSplitRequests -= id
-            },
-            failed = { reportMeshSplitCheckFailure(it) },
-            finished = { resumeMeshSplits() },
-        )
     }
 
     internal fun confirmMeshSplit(names: List<String>, sides: List<Side>) {
         val offer = pendingMeshSplit ?: return
-        val valid = validSplitDecisions(listOf(LayerSplitDecision(offer, names, sides)))
+        confirmMeshSplits(offer.preview, listOf(LayerSplitDecision(offer, names, sides)))
+    }
+
+    private fun confirmMeshSplits(preview: RigPreviewModel, decisions: List<LayerSplitDecision>) {
+        val valid = validSplitDecisions(decisions)
         if (valid.isEmpty()) return
-        pendingMeshSplit = null
+        val request = activeMeshSplitRequest
+        val generation = _state.value.projectOpenGeneration
         meshSplitApplying = true
+        pendingMeshSplit = null
+        pendingMeshSplitBatch = null
         scope.launch {
             try {
-                applyMeshSplits(offer.preview, valid)
+                if (_state.value.projectOpenGeneration != generation) return@launch
+                if (_state.value.previewModel !== preview) {
+                    if (request != null) meshSplitQueue.addFirst(request)
+                } else {
+                    applyMeshSplits(valid)
+                }
             } catch (failure: Throwable) {
-                importPresetContinuation.clear()
                 if (failure is kotlinx.coroutines.CancellationException) throw failure
                 setErrorMessage(workspaceFailureMessage(failure))
             } finally {
                 meshSplitApplying = false
+                activeMeshSplitRequest = null
                 resumeMeshSplits()
             }
         }
@@ -2127,14 +2101,8 @@ class PSD2LiveViewModel : AutoCloseable {
         d.names.map(String::trim).distinct().size == d.names.size
     }
 
-    /** Splits each decided layer of [basePreview] into its pieces as one history step; nothing if the model moved on. */
-    private suspend fun applyMeshSplits(basePreview: RigPreviewModel, validDecisions: List<LayerSplitDecision>) {
-        if (_state.value.previewModel !== basePreview) {
-            // The pieces were found on a model that has since been rebuilt; find them again on this one.
-            meshSplitScanQueued = true
-            setStatusText(tr("start.splits.rescanning"))
-            return
-        }
+    /** Splits each chosen layer into its pieces as one history step. */
+    private suspend fun applyMeshSplits(validDecisions: List<LayerSplitDecision>) {
         val workspace = requireNotNull(workspaceBackend) { "Workspace is not ready" }
         val expected = requireNotNull(validDecisions.first().offer.expected) { "Partition offer has no captured workspace state" }
         require(validDecisions.all { it.offer.expected?.state == expected.state }) { "Partition offers belong to different states" }
@@ -3508,6 +3476,11 @@ class PSD2LiveViewModel : AutoCloseable {
 		val target = runCatching { Path.of(path).toAbsolutePath().normalize() }.getOrNull()
 		val kind = target?.takeIf(Files::isRegularFile)?.let { classifyRecentPath(it.toString()) }
 		if (target == null || kind == null) { openRecentFile(path); return }
+		if (kind == RecentFileKind.PSD) {
+			openPsdGuide(target)
+			psdGuide.awaitIdle()
+			return
+		}
 		val permission = kotlinx.coroutines.CompletableDeferred<Boolean>()
 		withSavedChangesOrCancel({ permission.complete(false) }) { permission.complete(true) }
 		if (!permission.await()) return
@@ -3518,11 +3491,7 @@ class PSD2LiveViewModel : AutoCloseable {
 					openProjectNow(target, discardUnsaved = true)
 					if (_state.value.projectOpenGeneration != generation) leaveStartPage()
 				}
-				RecentFileKind.PSD -> {
-					setInputPath(target.toString())
-					analyze(discardUnsaved = true)
-					activeWorkJob?.join()
-				}
+				RecentFileKind.PSD -> Unit
 			}
 		} catch (failure: Exception) {
 			if (failure is kotlinx.coroutines.CancellationException) throw failure
@@ -3542,10 +3511,7 @@ class PSD2LiveViewModel : AutoCloseable {
 		}
 		when (classifyRecentPath(target.toString())) {
 			RecentFileKind.PROJECT -> openProject(target)
-			RecentFileKind.PSD -> withSavedChanges {
-				setInputPath(target.toString())
-				analyze()
-			}
+			RecentFileKind.PSD -> openPsdGuide(target)
 			null -> {
 				AppSettings.forgetRecentFile(path)
 				updateState { it.copy(recentFiles = AppSettings.recentFiles()) }
@@ -3701,13 +3667,13 @@ class PSD2LiveViewModel : AutoCloseable {
 		clearMeshSettingsPreviewState(layerId)
         workspaceBackend?.let { workspace ->
             val port: io.github.psd2live.application.WorkspaceSettingsPort = workspace
-            runWorkspaceCommand(after = { offerMeshSplit(listOf(layerId)) }) { state -> port.setLayerMeshSettings(state, layerId, null, true) }
+            runWorkspaceCommand(after = { offerMeshSplitAfterMeshSettings(layerId) }) { state -> port.setLayerMeshSettings(state, layerId, null, true) }
             return
         }
 		updateState { it.copy(meshOverrides = it.meshOverrides - layerId) }
 		schedulePreviewRebuild()
 	    editorChanged()
-		scope.launch { previewRebuildJob?.join(); offerMeshSplit(listOf(layerId)) }
+		scope.launch { previewRebuildJob?.join(); offerMeshSplitAfterMeshSettings(layerId) }
 	}
 
 	fun previewPartMeshSettings(layerId: String, settings: MeshSettings) {
@@ -3753,7 +3719,7 @@ class PSD2LiveViewModel : AutoCloseable {
         workspaceBackend?.let { workspace ->
             cancelPartMeshSettingsPreview(layerId)
             val port: io.github.psd2live.application.WorkspaceSettingsPort = workspace
-            runWorkspaceCommand(after = { offerMeshSplit(listOf(layerId)) }) { state ->
+            runWorkspaceCommand(after = { offerMeshSplitAfterMeshSettings(layerId) }) { state ->
                 port.setLayerMeshSettings(state, layerId, meshSettingFields(settings), false)
             }
             return
@@ -3774,10 +3740,10 @@ class PSD2LiveViewModel : AutoCloseable {
 				)
 			}
 			editorChanged()
-			offerMeshSplit(listOf(layerId))
+			offerMeshSplitAfterMeshSettings(layerId)
 		} else {
 			setPartMeshSettings(layerId, settings)
-			scope.launch { previewRebuildJob?.join(); offerMeshSplit(listOf(layerId)) }
+			scope.launch { previewRebuildJob?.join(); offerMeshSplitAfterMeshSettings(layerId) }
 		}
 	}
 
@@ -6424,7 +6390,7 @@ class PSD2LiveViewModel : AutoCloseable {
 
 	/** Where system files dragged over the window would land: the panels under the pointer register their zones. */
 	val fileDrops = FileDropRouter(fallback = { carried ->
-		if (_state.value.previewModel != null && carried.files.isNotEmpty() && carried.files.all { it.extension.equals("psd", true) })
+		if (activePage == null && _state.value.previewModel != null && carried.files.isNotEmpty() && carried.files.all { it.extension.equals("psd", true) })
 			FileDropIntent.ImportMaterials(null, tr("materials.reimport.drop"))
 		else carried.opens?.let { FileDropIntent.Open(it, tr("drop.intent.open", openedName(it))) }
 	}, hint = ::fileDropHint)
@@ -6483,8 +6449,9 @@ class PSD2LiveViewModel : AutoCloseable {
 		when (action) {
 			is io.github.psd2live.ui.utils.DesktopDropTarget.DroppedAction.OpenProject -> openProject(action.file.toPath())
 			is io.github.psd2live.ui.utils.DesktopDropTarget.DroppedAction.OpenPsd -> {
-				action.outputDir?.let { setOutputPath(it.absolutePath) }
-				withSavedChanges {
+				if (action.file.extension.equals("psd", true)) openPsdGuide(action.file.toPath(), action.outputDir?.toPath())
+				else withSavedChanges {
+					action.outputDir?.let { setOutputPath(it.absolutePath) }
 					setInputPath(action.file.absolutePath)
 					analyze(discardUnsaved = true)
 				}
@@ -6537,7 +6504,7 @@ class PSD2LiveViewModel : AutoCloseable {
                 if (_state.value.activeCanvas.id == canvasId && _state.value.activeCanvas.mode != CanvasMode.EDIT) setCanvasMode(canvasId, CanvasMode.EDIT)
                 canvasEditorFor(canvasId).selectImportedLayer(placeId)
                 selectOnCanvas(workspaceId, canvasId, CanvasMode.EDIT, placeId)
-                if (!asReference) offerMeshSplit(ids)
+                if (!asReference) offerImportMeshSplit(ids)
             } catch (failure: Exception) {
                 if (failure is kotlinx.coroutines.CancellationException) throw failure
                 setErrorMessage(failure.message ?: tr("error.importLayerFailed"))
@@ -7033,7 +7000,7 @@ class PSD2LiveViewModel : AutoCloseable {
 	 */
 	fun snapToNearestKeys(kind: String, id: String, onReady: () -> Unit): Boolean {
 		val puppet = _state.value.previewModel?.rig?.puppet ?: return false
-        val axes = io.github.psd2live.core.GeometryKeyforms.editingAxes(puppet, kind, id)
+		val axes = puppet.keyformAxesFor(kind, id)
 		return snapAxesToNearestKeys(axes, onReady)
 	}
 
@@ -7041,7 +7008,7 @@ class PSD2LiveViewModel : AutoCloseable {
 	fun snapTargetsToNearestKeys(targets: List<Pair<String, String>>, onReady: () -> Unit): Boolean {
 		val puppet = _state.value.previewModel?.rig?.puppet ?: return false
 		if (targets.isEmpty()) return false
-        val axes = targets.flatMap { (kind, id) -> io.github.psd2live.core.GeometryKeyforms.editingAxes(puppet, kind, id) }
+		val axes = targets.flatMap { (kind, id) -> puppet.keyformAxesFor(kind, id) }
 			.distinctBy { it.parameterId to it.keys.contentHashCode() }
 		return snapAxesToNearestKeys(axes, onReady)
 	}
@@ -7548,7 +7515,7 @@ class PSD2LiveViewModel : AutoCloseable {
 		updateState { it.copy(exportSuccess = null, focusCanvasRequest = it.focusCanvasRequest + 1) }
 	}
 
-    fun analyze(discardUnsaved: Boolean = false) {
+    fun analyze(discardUnsaved: Boolean = false, checkImportedMeshSplits: Boolean = true) {
         if (_state.value.isBusy || _state.value.projectSaving) return
         val rawInput = _state.value.inputPath.trim()
         if (rawInput.isEmpty()) { updateState { it.copy(errorMessage = tr("dialog.inputRequired")) }; return }
@@ -7567,11 +7534,114 @@ class PSD2LiveViewModel : AutoCloseable {
             if (!layout) {
                 if (choices.initialMode() != io.github.psd2live.application.WorkspaceInitialModifiers.EMPTY)
                     importPresetContinuation.start(_state.value.projectOpenGeneration, choices)
-                // Mesh splitting is now a composable mesh.split modifier rather than an import-time modal.
+                if (checkImportedMeshSplits) {
+                    offerImportMeshSplit(_state.value.previewModel?.analysis?.source?.layers.orEmpty().map { it.id.raw })
+                }
                 resumeMeshSplits()
             }
         }) { if (layout) it.importLayout(path, discardUnsaved) else it.importPsd(path, discardUnsaved,
             io.github.psd2live.application.WorkspaceInitialModifiers.EMPTY) }
+    }
+
+    internal val psdGuide by lazy { PsdGuideState(scope) }
+
+    internal fun openPsdGuide(path: Path, outputDirectory: Path? = null) {
+        val target = path.toAbsolutePath().normalize()
+        if (!_state.value.showPsdImportGuide && AppPage.PSD_GUIDE !in openPages) {
+            importPsdWithDefaults(target, outputDirectory)
+            return
+        }
+        val host = (workspaceBackend as? DesktopWorkspace)?.host ?: return
+        psdGuide.request(target, outputDirectory, host)
+        showPage(AppPage.PSD_GUIDE, PSD_GUIDE_CONTENT)
+    }
+
+    internal fun discardPsdGuide() {
+        if (!psdGuide.discard((workspaceBackend as? DesktopWorkspace)?.host)) return
+        openPages = openPages - AppPage.PSD_GUIDE
+        if (_state.value.analysis == null) showStartPage() else showWorkspace()
+    }
+
+    internal fun skipPsdGuideOnce() = finishPsdGuideWithDefaults(disableGuide = false)
+
+    internal fun disablePsdGuideAndImport() = finishPsdGuideWithDefaults(disableGuide = true)
+
+    private fun finishPsdGuideWithDefaults(disableGuide: Boolean) {
+        val workspace = workspaceBackend as? DesktopWorkspace ?: return
+        if (psdGuide.busy || psdGuide.saving || _state.value.isBusy || _state.value.projectSaving) return
+        val draft = psdGuide.guide ?: return
+        withSavedChanges {
+            if (psdGuide.busy || psdGuide.saving || psdGuide.guide !== draft) return@withSavedChanges
+            if (disableGuide) setPromptEnabled(AppPrompt.PSD_IMPORT_GUIDE, false)
+            flushEditorFields()
+            endSwing()
+            previewRebuildJob?.cancel()
+            psdGuide.installDefaults(
+                host = workspace.host,
+                autoSplit = _state.value.autoDetectMeshSplitsOnImport,
+                before = { preparePsdGuideExecution(workspace) },
+                onSuccess = { completePsdGuideInstall(draft.path, psdGuide.outputDirectory) },
+            )
+        }
+    }
+
+    private fun importPsdWithDefaults(target: Path, outputDirectory: Path?) {
+        val workspace = workspaceBackend as? DesktopWorkspace ?: return
+        if (psdGuide.busy || psdGuide.saving || _state.value.isBusy || _state.value.projectSaving) return
+        withSavedChanges {
+            if (psdGuide.busy || psdGuide.saving || _state.value.isBusy || _state.value.projectSaving) return@withSavedChanges
+            flushEditorFields()
+            endSwing()
+            previewRebuildJob?.cancel()
+            psdGuide.importWithDefaults(
+                path = target,
+                outputDirectory = outputDirectory,
+                host = workspace.host,
+                autoSplit = _state.value.autoDetectMeshSplitsOnImport,
+                before = { preparePsdGuideExecution(workspace) },
+                onSuccess = { completePsdGuideInstall(target, outputDirectory) },
+                onError = ::setErrorMessage,
+            )
+        }
+    }
+
+    internal fun createPsdGuideProject(onCompleted: (() -> Unit)? = null) {
+        val workspace = workspaceBackend as? DesktopWorkspace ?: return
+        if (psdGuide.busy || psdGuide.saving || _state.value.isBusy || _state.value.projectSaving) return
+        val draft = psdGuide.guide ?: return
+        val candidate = psdGuide.finalCandidate ?: return
+        withSavedChanges {
+            if (psdGuide.guide !== draft || psdGuide.finalCandidate !== candidate) return@withSavedChanges
+            flushEditorFields()
+            endSwing()
+            previewRebuildJob?.cancel()
+            psdGuide.install(
+                workspace.host,
+                before = { preparePsdGuideExecution(workspace) },
+                onSuccess = {
+                    completePsdGuideInstall(draft.path, psdGuide.outputDirectory)
+                    onCompleted?.invoke()
+                },
+            )
+        }
+    }
+
+    private suspend fun preparePsdGuideExecution(
+        workspace: DesktopWorkspace,
+    ): io.github.psd2live.application.WorkspaceExecution {
+        awaitProjectDrafts(workspace, true)
+        _state.first { !it.workspaceEditBusy }
+        val expected = workspace.snapshot()
+        return io.github.psd2live.application.WorkspaceExecution(expected.projectId, expected.state, MutationAuthor.USER)
+    }
+
+    private fun completePsdGuideInstall(inputPath: Path, outputDirectory: Path?) {
+        outputDirectory?.let { setOutputPath(it.toAbsolutePath().toString()) }
+        setInputPath(inputPath.toString())
+        psdGuide.clear()
+        openPages = openPages - AppPage.PSD_GUIDE
+        leaveStartPage()
+        openWorkspacePreset(WorkspacePreset.EDIT)
     }
 
     /** Both adapters invoke the same application source capability; only this entry owns GUI confirmation. */
@@ -8529,6 +8599,7 @@ class PSD2LiveViewModel : AutoCloseable {
 
 	override fun close() {
         if (!isClosed.compareAndSet(false, true)) return
+        psdGuide.clear()
         projectLifecycle.close()
         modifiers.close()
         materials.close()

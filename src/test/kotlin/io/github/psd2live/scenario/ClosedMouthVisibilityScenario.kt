@@ -1,6 +1,6 @@
 package io.github.psd2live.scenario
 
-import io.github.psd2live.algorithms.binding.ClosedMouthVisibility
+import io.github.psd2live.core.modifier.ClosedMouthVisibility
 import io.github.psd2live.application.*
 import io.github.psd2live.core.*
 import io.github.psd2live.core.modifier.*
@@ -61,6 +61,8 @@ class ClosedMouthVisibilityScenario {
             stack.instances.map { if (it.id == owner.id) it.copy(plugin = reference) else it }).toJson()))
         try {
             Studio.run(temp.resolve("workspace"), saved) {
+                assertEquals(ModifierStatus.ACTIVE, now.model.modifierEvaluation!!.entries.single { it.instance.id == owner.id }.status,
+                    now.model.rig.modifierReport.toString())
                 val openId = now.model.rig.ownLayerIdByDrawableId.entries.first { it.value == "mouth" }.key
                 val closedId = now.model.rig.ownLayerIdByDrawableId.entries.first { it.value == "closed-mouth" }.key
                 val ribbons = stack.instances.flatMap { MouthVisibilityCustomization.outlineOwners(it, setOf(openId)).keys }
@@ -83,7 +85,8 @@ class ClosedMouthVisibilityScenario {
                 assertEquals(original, RigIrCompiler.compile(now.model), "Opening an uncustomized project must not migrate its output")
 
                 fun keyEdit(action: String, value: Float, from: Float? = null) {
-                    edit("$action deformation stop $value", "keyform_apply", req("changes" to listOf(mapOf(
+                    val target = if (separate) mapOf("target" to "mesh:$openId", "track" to "geometry") else emptyMap()
+                    edit("$action deformation stop $value", "keyform_apply", req("changes" to listOf(target + mapOf(
                         "op" to "parameter_keys", "parameter" to parameter.raw, "action" to action, "values" to listOf(value)) +
                         (from?.let { mapOf("from" to it) } ?: emptyMap()))))
                 }
