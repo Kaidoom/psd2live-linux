@@ -111,7 +111,7 @@ internal object LayoutManifest {
         layout.layers.withIndex().map { (index, layer) ->
             val hidden = prefixes(layer.group).any { layout.groups[it]?.visible == false }
             WorkspaceMaterialFiles.Entry(layer.name, folder + layer.group.split('/').filter { it.isNotEmpty() }, MaterialKind.BITMAP,
-                layer.raster, layer.rect, origin = "$origin#$index", opacity = layer.opacity, visible = layer.visible && !hidden,
+                layer.raster, layer.rect, origin = "$origin#$index", sourceFileName = origin, opacity = layer.opacity, visible = layer.visible && !hidden,
                 placementWidth = layout.width, placementHeight = layout.height, tags = layer.tags.orEmpty(), reference = layer.reference)
         }
 

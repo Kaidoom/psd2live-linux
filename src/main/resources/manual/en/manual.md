@@ -723,7 +723,10 @@ The chosen preset is remembered, and PSDs imported later from the menu, recent f
 *> For users coming from Cubism: parts are built automatically from the recognized parts, not from the PSD folders. To open an existing Cubism model project, use [[cmo3-import]].
 
 @@ psd-re-import | Re-import PSDs
-Right-click the original PSD folder in **Materials**, choose **Reimport PSD**, and select the updated file. Review any uncertain matches or changes to layer bounds. Leave **Fit updated artwork to existing canvas bounds** off to use the updated PSD placement and remesh changed layers. Enable it to keep their current canvas rectangles.
+Drop the edited PSD into the open workspace or right-click its source folder in **Materials** and choose **Reimport PSD**. Matched materials take their colors from the file. When newly visible pixels extend beyond a linked mesh, reimport rebuilds that mesh in the same undo step.
+
+## Reimporting a Materials folder
+Review any uncertain matches or changes to layer bounds. Leave **Fit updated artwork to existing canvas bounds** off to use the updated PSD placement and remesh changed layers. Enable it to keep their current canvas rectangles.
 The import guide can split a source layer into independent project layers. To update that artwork from the original PSD later, keep the layer unsplit in the guide. For independent parts that each need a PSD link, give them separate layers in Photoshop before importing.
 ## Replacing one layer's pixels
 1. Select the layer to update on the canvas or in the layer list.

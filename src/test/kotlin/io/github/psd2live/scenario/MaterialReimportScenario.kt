@@ -19,6 +19,27 @@ import kotlin.test.*
 class MaterialReimportScenario {
     @TempDir lateinit var temp: Path
 
+    @Test fun reimportRepairsATruncatedSavedFolderAndKeepsItsMaterialLinks() = Studio.run(temp, checks = emptySet()) {
+        val psd = Files.move(Characters.figurePsd(temp), temp.resolve("Figure#2.psd"))
+        importPsd(psd, PipelineConfig(atlasSize = 512, exportMoc3 = false))
+        val original = now.document
+        val library = original.layout.materials
+        val folder = library.folders.single { it.origin == psd.fileName.toString() }
+        val legacy = library.copy(folders = library.folders.map { if (it.id == folder.id) it.copy(origin = "Figure") else it })
+        val document = original.copy(layout = original.layout.copy(materials = legacy))
+        step("load old folder metadata") {
+            runtime.install(now.state, now.projectId, document, builder.build(document), discardUnsaved = true)
+        }
+        reopen()
+        edit("reimport archived PSD", WorkspaceMaterialReimport.OP, req("folder_id" to folder.id,
+            "staging" to WorkspaceMaterialStaging.stage(WorkspaceMaterialFiles.read(listOf(psd)))))
+        reopen()
+        val repaired = now.document.layout
+        assertEquals("Figure#2.psd", repaired.materials.folder(folder.id)!!.origin)
+        assertEquals(original.layout.layerMaterials, repaired.layerMaterials)
+        assertEquals(library.items.map { it.id }, repaired.materials.items.map { it.id })
+    }
+
     @Test fun artworkUpdatesAllUsersWithoutChangingAuthoredRigAndSurvivesHistoryAndReload() =
         Studio.run(temp, checks = setOf(Studio.Check.UNDO, Studio.Check.REPLAY)) {
             val psd = Characters.figurePsd(temp)

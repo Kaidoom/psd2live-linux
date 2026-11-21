@@ -99,6 +99,24 @@ internal object WorkspaceRasterEdits {
             rect = own.rect ?: LayerCanvasRect.of(own.bounds)), work)
     }
 
+    /** The current pixels and mesh migrations within an atomic multi-layer update, on the original rig's atlas. */
+    fun workingModel(document: WorkspaceDocument, base: RigPreviewModel): RigPreviewModel {
+        if (document.source === base.analysis.source && document.rigEdits === base.config.rigEdits &&
+            document.generationSource === base.config.generationSource && document.meshSource === base.config.meshSource) return base
+        val byId = document.source.layers.associateBy { it.id }
+        val layers = base.analysis.layers.map { cl ->
+            val next = byId[cl.source.id] ?: return@map cl
+            if (next === cl.source) cl else cl.copy(source = CanvasDensity.canvasLayer(next))
+        }
+        val addedJournal = document.rigEdits.authoringJournal.drop(base.config.rigEdits.authoringJournal.size)
+        val puppet = addedJournal.fold(base.rig.puppet) { acc, cmd -> RigAuthoringJournal.apply(acc, cmd) }
+        return base.copy(
+            analysis = base.analysis.copy(source = document.source, layers = layers),
+            rig = if (puppet === base.rig.puppet) base.rig else base.rig.copy(puppet = puppet),
+            config = document.config(),
+        )
+    }
+
     fun prepare(document: WorkspaceDocument, model: RigPreviewModel, request: WorkspacePaintRaster,
                 work: WorkspaceRasterWork = WorkspaceRasterWork.Direct): WorkspaceDocument =
         // Cut along the layer's meshes, the paint off them a layer of its own ([WorkspacePaintOverflow]); a layer's
@@ -125,9 +143,10 @@ internal object WorkspaceRasterEdits {
             else PaintPixels(painted.raster, painted.rect ?: LayerCanvasRect.of(painted.bounds))
         val samePixels = painted.samePixels(PaintSpace.of(layer, canvasWidth, canvasHeight).cropLayer(layer, work::checkpoint))
         val missingMesh = model.rig.puppet.drawables.none { drawable -> drawable.mesh != null && model.rig.ownLayerIdByDrawableId[drawable.id.raw] == id }
+        val threshold = if (model.config.meshAlphaCoverage) 0 else model.config.alphaThreshold
         val visiblePixels = (0 until painted.raster.width * painted.raster.height).any {
             if (it % painted.raster.width == 0) work.checkpoint()
-            (painted.raster.rgba[it * 4 + 3].toInt() and 255) > model.config.alphaThreshold
+            (painted.raster.rgba[it * 4 + 3].toInt() and 255) > threshold
         }
         val rebuild = visiblePixels && (request.rebuildMesh || missingMesh) && !DepthSplit.isFrontLayer(model, id)
         if (samePixels && !rebuild) return document

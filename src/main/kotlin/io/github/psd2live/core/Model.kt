@@ -187,6 +187,11 @@ data class PipelineConfig(
 	val meshTrace: MeshTrace = MeshTrace.TEXTURE,
 	/** Explicit pixel rebuilds include the feathered edge of these layers in their silhouette. */
 	val visiblePixelMeshLayers: Set<String> = emptySet(),
+	/**
+	 * Whether generated meshes cover every pixel with any alpha, not only those above [alphaThreshold], so soft edges
+	 * are never clipped. Off by default; projects saved before it keep their meshes.
+	 */
+	val meshAlphaCoverage: Boolean = false,
 	/** [MeshSettings.wrap] of every layer without an override; projects saved before it wrap nothing. */
 	val meshWrap: Float = 0f,
 	val alphaThreshold: Int = 8,

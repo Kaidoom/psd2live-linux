@@ -208,7 +208,8 @@ internal class WorkspaceDocumentCommands(private val runtime: WorkspaceRuntime<R
             WorkspaceAssetLayerEdits.validate(prepared.before.document, prepared.draft.document, prepared.model)
             try {
                 WorkspaceModifierEdits.validateAppliedContent(prepared.before.model, prepared.model)
-                if (edits.any { WorkspaceArtworkRemesh.requested(it, prepared.before.document) }) WorkspaceGenerationEdits.validateRefresh(prepared.before.model, prepared.model)
+                if (edits.any { it.operation == WorkspaceMaterialReimport.OP || WorkspaceArtworkRemesh.requested(it, prepared.before.document) })
+                    WorkspaceGenerationEdits.validateRefresh(prepared.before.model, prepared.model)
             } catch (failure: IllegalArgumentException) {
                 val index = edits.lastIndex
                 throw WorkspaceBatchEditException(index, edits[index].operation, failure)

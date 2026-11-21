@@ -1427,6 +1427,7 @@ class PSD2LiveViewModel : AutoCloseable {
 
     /** Back to the active workspace; the start page folds away, other pages keep their tabs. */
     fun leaveStartPage() {
+        if (activePage == AppPage.START && startSection == StartSection.SETTINGS) endSettingsPage()
         openPages = openPages - AppPage.START
         showWorkspace()
     }
@@ -1434,36 +1435,36 @@ class PSD2LiveViewModel : AutoCloseable {
     /** Opens [page] as a tab and shows it, with [module] brought forward when given. */
     internal fun showPage(page: AppPage, module: String? = null) {
         if (page !in openPages) openPages = AppPage.entries.filter { it in openPages || it == page }
-        if (activePage == AppPage.SETTINGS && page != AppPage.SETTINGS) endSettingsPage()
+        if (activePage == AppPage.START && startSection == StartSection.SETTINGS && page != AppPage.START) endSettingsPage()
         activePage = page
         if (module != null && module in page.modules) requestedPageModule = module
     }
 
-    /** Shows the help page on [tab], its content panel brought forward. */
+    /** Shows the help section on [tab] inside the start hub. */
     internal fun showHelp(tab: HelpTab) {
         helpTab = tab
-        showPage(AppPage.HELP, HELP_CONTENT)
+        showStartPage(StartSection.HELP)
     }
 
     internal fun setHelpTab(tab: HelpTab) {
         helpTab = tab
     }
 
-    /** Shows the manual or tutorial page [id] on the help page; a page that does not open is ignored. */
+    /** Shows the manual or tutorial page [id] in the help section; a page that does not open is ignored. */
     internal fun showHelpPage(id: String) {
         val page = Manual.page(id)?.takeIf { it.opens } ?: return
         helpPage = page.id
         helpTab = if (page.root == Manual.Root.MANUAL) HelpTab.MANUAL else HelpTab.TUTORIALS
-        showPage(AppPage.HELP, HELP_CONTENT)
+        showStartPage(StartSection.HELP)
     }
 
     internal fun setSettingsTopic(topic: SettingsTopic) {
         settingsTopic = topic
     }
 
-    /** Shows [page], or goes back to the workspace when it already shows: what its shortcut does. */
-    internal fun togglePage(page: AppPage, module: String? = null) {
-        if (activePage == page && module == null) showWorkspace() else showPage(page, module)
+    /** Shows [section] on the start hub, or goes back to the workspace when it already shows: what its shortcut does. */
+    internal fun toggleStartSection(section: StartSection) {
+        if (activePage == AppPage.START && startSection == section) showWorkspace() else showStartPage(section)
     }
 
     /** Closes [page]'s tab, showing the workspace if it was the page shown. */
@@ -1475,14 +1476,14 @@ class PSD2LiveViewModel : AutoCloseable {
             }
             return
         }
+        if (page == AppPage.START && activePage == AppPage.START && startSection == StartSection.SETTINGS) endSettingsPage()
         openPages = openPages - page
         if (activePage == page) activePage = null
-        if (page == AppPage.SETTINGS) endSettingsPage()
     }
 
     /** Back to the active workspace, every page keeping its tab. */
     internal fun showWorkspace() {
-        if (activePage == AppPage.SETTINGS) endSettingsPage()
+        if (activePage == AppPage.START && startSection == StartSection.SETTINGS) endSettingsPage()
         activePage = null
     }
 
@@ -1511,6 +1512,7 @@ class PSD2LiveViewModel : AutoCloseable {
     }
 
     internal fun setStartSection(section: StartSection) {
+        if (startSection == StartSection.SETTINGS && section != StartSection.SETTINGS) endSettingsPage()
         startSection = section
     }
 
@@ -2180,6 +2182,7 @@ class PSD2LiveViewModel : AutoCloseable {
         if (_state.value.workspaceEditBusy || _state.value.editorDraftBusy) { onComplete("An editor operation is still being applied"); return }
         updateState { it.copy(canvasEditBusy = true) }
         scope.launch {
+            var busyCleared = false
             try {
                 val failure = try {
                     withContext(Dispatchers.Default) { mutation() }
@@ -2188,10 +2191,13 @@ class PSD2LiveViewModel : AutoCloseable {
                     if (failure is kotlinx.coroutines.CancellationException) throw failure
                     failure.message ?: "Could not save editor changes"
                 }
+                // Clear busy before invoking onComplete so callbacks (e.g. an immediate save) see an idle workspace.
+                updateState { it.copy(canvasEditBusy = false) }
+                busyCleared = true
                 // A failed completion callback cannot turn an already committed edit into a rejected one.
                 onComplete(failure)
             } finally {
-                updateState { it.copy(canvasEditBusy = false) }
+                if (!busyCleared) updateState { it.copy(canvasEditBusy = false) }
                 runQueuedProjectSave()
             }
         }
@@ -2603,6 +2609,7 @@ class PSD2LiveViewModel : AutoCloseable {
             projectId = projectId, projectSourceName = if (replacing) current.projectSourceName else sourceName,
             projectFile = if (replacing) current.projectFile else null,
             inputPath = if (replacing) current.inputPath else path?.toString().orEmpty(),
+            externalPsdPath = if (replacing) current.externalPsdPath else path?.takeIf { it.fileName.toString().endsWith(".psd", true) }?.toString(),
             loadedInputPath = if (replacing) current.loadedInputPath else path?.toString(),
             loadedInputFileSignature = if (replacing) current.loadedInputFileSignature else null,
             analysis = preview.analysis, previewModel = preview, previewModelDirty = false,
@@ -3647,6 +3654,20 @@ class PSD2LiveViewModel : AutoCloseable {
             return
         }
 		updateState { it.copy(meshTrace = trace) }
+		schedulePreviewRebuild()
+		editorChanged()
+	}
+
+	/** Switches whether meshes cover every pixel with any alpha; the meshes are rebuilt like any global mesh change. */
+	fun setMeshAlphaCoverage(enabled: Boolean) {
+		if (state.value.meshAlphaCoverage == enabled) return
+        workspaceBackend?.takeUnless { editorSessions.anyOpen }?.let { workspace ->
+            val port: io.github.psd2live.application.WorkspaceSettingsPort = workspace
+            runWorkspaceCommand { state -> port.updateProjectSettings(state,
+                kotlinx.serialization.json.buildJsonObject { put("meshAlphaCoverage", enabled) }) }
+            return
+        }
+		updateState { it.copy(meshAlphaCoverage = enabled) }
 		schedulePreviewRebuild()
 		editorChanged()
 	}
@@ -4941,12 +4962,12 @@ class PSD2LiveViewModel : AutoCloseable {
 		updateState { it.copy(mutedPrompts = emptySet()) }
 	}
 
-	fun openSettings() = showPage(AppPage.SETTINGS)
+	fun openSettings() = showStartPage(StartSection.SETTINGS)
 
-	/** Opens the settings page on [topic]. */
+	/** Opens the settings section on [topic]. */
 	internal fun openSettings(topic: SettingsTopic) {
 		settingsTopic = topic
-		showPage(AppPage.SETTINGS, SETTINGS_CONTENT)
+		showStartPage(StartSection.SETTINGS)
 	}
 
 	/** Leaving the settings page: a shortcut being recorded is dropped and the canvas takes the keys again. */
@@ -6989,6 +7010,31 @@ class PSD2LiveViewModel : AutoCloseable {
 	}
 
 	private var parameterSnapJob: Job? = null
+	private var parameterSnapNoticeJob: Job? = null
+	private val _parameterSnapNotice = MutableStateFlow<String?>(null)
+	/** Brief non-intrusive notice shown on the edit canvas when deformation snaps parameters to nearest keys. */
+	val parameterSnapNotice: StateFlow<String?> = _parameterSnapNotice.asStateFlow()
+
+	private fun showParameterSnapNotice(targets: Map<ParameterId, Float>, puppet: org.umamo.runtime.model.PuppetModel) {
+		val items = targets.entries.map { (id, value) ->
+			val name = puppet.parameters.firstOrNull { it.id == id }?.name?.takeIf { it.isNotBlank() } ?: id.raw
+			val formatted = if (kotlin.math.abs(value - kotlin.math.round(value)) < 1e-4f) kotlin.math.round(value).toInt().toString()
+				else "%.2f".format(java.util.Locale.ROOT, value).trimEnd('0').trimEnd('.')
+			name to formatted
+		}
+		val text = when (items.size) {
+			0 -> return
+			1 -> tr("canvas.snap.notice.one", items[0].first, items[0].second)
+			2 -> tr("canvas.snap.notice.two", items[0].first, items[0].second, items[1].first, items[1].second)
+			else -> tr("canvas.snap.notice.many", items[0].first, items[0].second, items.size)
+		}
+		_parameterSnapNotice.value = text
+		parameterSnapNoticeJob?.cancel()
+		parameterSnapNoticeJob = scope.launch {
+			delay(1800L)
+			if (_parameterSnapNotice.value == text) _parameterSnapNotice.value = null
+		}
+	}
 
 	/** True while a snap-to-nearest-key animation is running. */
 	val isSnappingParameters: Boolean get() = parameterSnapJob?.isActive == true
@@ -7049,14 +7095,10 @@ class PSD2LiveViewModel : AutoCloseable {
 		if (axes.isEmpty()) return false
 		val pose = _state.value.parameterValues
 		val defaults = puppet.parameters.associate { it.id to it.default }
-		val targets = try { io.github.psd2live.core.nearestKeyPose(axes, pose, defaults) }
-		catch (failure: io.github.psd2live.core.NoCommonKeyform) {
-			val name = puppet.parameters.firstOrNull { it.id == failure.parameter }?.name ?: failure.parameter.raw
-			updateState { it.copy(statusText = tr("editor.keyform.noCommon", name)) }
-			return true // Consume the gesture; never start an edit at an incompatible pose.
-		}
+		val targets = io.github.psd2live.core.nearestKeyPose(axes, pose, defaults)
 		if (targets.isEmpty()) return false
 		val expectedState = currentWorkspaceState() ?: return false
+		showParameterSnapNotice(targets, puppet)
 		parameterSnapJob?.cancel()
 		parameterSnapJob = scope.launch {
 			try {
@@ -7515,6 +7557,8 @@ class PSD2LiveViewModel : AutoCloseable {
 		updateState { it.copy(exportSuccess = null, focusCanvasRequest = it.focusCanvasRequest + 1) }
 	}
 
+    internal fun rememberExternalPsd(path: String) = updateState { it.copy(externalPsdPath = path) }
+
     fun analyze(discardUnsaved: Boolean = false, checkImportedMeshSplits: Boolean = true) {
         if (_state.value.isBusy || _state.value.projectSaving) return
         val rawInput = _state.value.inputPath.trim()
@@ -7907,7 +7951,6 @@ class PSD2LiveViewModel : AutoCloseable {
 		status: String,
 		expectedProjectId: String? = _state.value.projectId,
 		expectedProjectOpenGeneration: Long = _state.value.projectOpenGeneration,
-		restoreCheckedOutPose: Boolean = false,
 	) {
 		var applied = false
 		var drafted = false
@@ -7968,18 +8011,11 @@ class PSD2LiveViewModel : AutoCloseable {
 				// Canvas solo is local presentation; a document commit neither ends nor forgets it.
 				isolationSnapshot = current.isolationSnapshot,
 				lockedParameters = current.lockedParameters.intersect(preview.rig.puppet.parameters.mapTo(mutableSetOf()) { it.id }),
-				parameterValues = if (restoreCheckedOutPose) {
-					preview.rig.puppet.parameters.associate { it.id to it.default }
-				} else {
-					preview.rig.puppet.parameters.associate { parameter ->
-						parameter.id to (current.parameterValues[parameter.id] ?: parameter.default).coerceIn(parameter.min, parameter.max)
-					}
+				// The pose is not part of the document: a commit or a history checkout (undo, redo) keeps it.
+				parameterValues = preview.rig.puppet.parameters.associate { parameter ->
+					parameter.id to (current.parameterValues[parameter.id] ?: parameter.default).coerceIn(parameter.min, parameter.max)
 				},
-				previewParameterValues = if (restoreCheckedOutPose) {
-					preview.rig.puppet.parameters.associate { it.id to it.default }
-				} else {
-					current.previewParameterValues
-				},
+				previewParameterValues = current.previewParameterValues,
 				statusText = status,
 				errorMessage = null,
 			).let { shownState ->

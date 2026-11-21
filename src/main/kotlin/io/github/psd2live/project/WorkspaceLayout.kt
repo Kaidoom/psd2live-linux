@@ -225,6 +225,46 @@ data class MaterialLibrary(val folders: List<MaterialFolder> = emptyList(), val 
 	fun folder(id: String): MaterialFolder? = folderById[id]
 	fun item(id: String): MaterialItem? = itemById[id]
 
+	/** Older imports truncated folder origins at the first '#'. Prefer the actual filename when it can be recovered. */
+	fun sourceFileName(folder: MaterialFolder): String {
+		val path = folder.sourcePath
+		val savedName = if ('/' in path) path.substringAfterLast('/') else path.substringAfterLast('\\')
+		if (savedName.endsWith(".psd", true) && '#' in savedName && savedName.substringBefore('#') == folder.origin) return savedName
+		if ('#' in folder.name && folder.origin == folder.name.substringBefore('#')) {
+			val expected = "${folder.name}.psd"
+			val descendants = subtree(folder.id)
+			val item = items.firstOrNull { it.folderId in descendants && it.origin.startsWith("$expected#", ignoreCase = true) }
+			if (item != null) return item.origin.take(expected.length)
+		}
+		return folder.origin
+	}
+
+	/** Interpret a layered origin relative to its source folder. Layer IDs themselves can contain '#'. */
+	fun sourceFileName(item: MaterialItem): String {
+		val origin = item.origin
+		if ('#' !in origin) return origin
+		val prefix = origin.substringBeforeLast('#')
+		val suffix = origin.substringAfterLast('#')
+		if (prefix.endsWith(".psd", true) && (suffix.startsWith("lyid:") || suffix == "psd:composite")) return prefix
+		// In PSDs without stable IDs the reader uses the original layer name followed by its record index.
+		if (suffix.toIntOrNull() != null) {
+			val nameSuffix = "#${item.sourceLayerPath?.lastOrNull() ?: item.name}"
+			if (prefix.endsWith(nameSuffix)) return prefix.removeSuffix(nameSuffix)
+		}
+		// Flat image imports have no source rectangle. Their whole filename is the origin, even inside a PSD folder.
+		if (item.placement == null && item.sourceLayerPath == null) return origin
+		for (folder in ancestry(item.folderId)) {
+			val file = sourceFileName(folder)
+			if (file.isNotEmpty() && origin.startsWith("$file#")) return file
+		}
+		return origin
+	}
+
+	internal fun originLayerId(item: MaterialItem): String? {
+		val file = sourceFileName(item)
+		return item.origin.removePrefix("$file#").takeIf { it != item.origin }
+	}
+
 	/** [folderId] and the folders above it, nearest first. */
 	fun ancestry(folderId: String?): List<MaterialFolder> = generateSequence(folderId?.let(::folder)) { it.parentId?.let(::folder) }.toList()
 

@@ -151,7 +151,7 @@ internal object WorkspaceMaterialEdits {
                 val existing = folders.firstOrNull { it.parentId == parent && it.name == name }
                 parent = existing?.id ?: StableIds.fresh(StableIds.stem("folder_", parent, name)) { it in ids }.also { id ->
                     ids += id
-                    folders += MaterialFolder(id, requireName(name), parent, origin = if (index == entry.fileFolder) entry.origin.substringBefore('#') else "",
+                    folders += MaterialFolder(id, requireName(name), parent, origin = if (index == entry.fileFolder) entry.sourceFileName else "",
                         sourcePath = if (index == entry.fileFolder) entry.sourcePath else "")
                 }
             }
@@ -249,13 +249,17 @@ internal object WorkspaceMaterialEdits {
     fun deleteUnused(document: WorkspaceDocument, folderId: String): WorkspaceDocument {
         val library = document.layout.materials
         val remove = unusedIds(document.layout, folderId)
+        if (remove.isEmpty()) return document
         val items = library.items.filter { it.id !in remove }
-        val scope = library.subtree(folderId) - folderId
+        // An already empty folder can be an intentional part of the artist's library.
+        val affected = library.items.asSequence().filter { it.id in remove }.map { it.folderId }.distinct()
+            .flatMap { library.ancestry(it).asSequence().takeWhile { folder -> folder.id != folderId } }
+            .map { it.id }.toSet()
         var folders = library.folders
         do {
             val previous = folders
             val occupied = items.mapNotNull { it.folderId }.toSet() + folders.mapNotNull { it.parentId }
-            folders = folders.filter { it.id !in scope || it.id in occupied }
+            folders = folders.filter { it.id !in affected || it.id in occupied }
         } while (folders.size != previous.size)
         return document.withLibrary(MaterialLibrary(folders, items))
     }

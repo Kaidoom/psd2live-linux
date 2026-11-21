@@ -78,7 +78,11 @@ internal object WorkspaceMaterialFiles {
         val sourcePath: String = "",
         val sourceLayerId: String? = null,
         val sourceLayerPath: List<String>? = null,
-    )
+        /** The filename supplied by the reader. A layer's origin also contains its unescaped layer ID. */
+        val sourceFileName: String = origin,
+    ) {
+        val isPsdLayer get() = fileFolder >= 0 && sourceFileName.endsWith(".psd", true)
+    }
 
     /**
      * The materials [paths] hold: a file gives its image, a PSD, CMO3 or layout manifest ([LayoutManifest], also inside
@@ -194,7 +198,7 @@ internal object WorkspaceMaterialFiles {
             val groups = layer.groupPath.split('/').filter { it.isNotEmpty() }.map { name(it, "group") }
             val hidden = groups.indices.any { depth -> art.groups.firstOrNull { it.path == groups.take(depth + 1).joinToString("/") }?.visible == false }
             Entry(name(layer.name, layer.id.raw), folder + groups, MaterialKind.BITMAP, layer.raster,
-                layer.storedCanvasRect ?: LayerCanvasRect.of(layer.bounds), origin = "$origin#${layer.id.raw}",
+                layer.storedCanvasRect ?: LayerCanvasRect.of(layer.bounds), origin = "$origin#${layer.id.raw}", sourceFileName = origin,
                 opacity = layer.opacity, visible = layer.visible && !hidden, placementWidth = art.widthPx, placementHeight = art.heightPx,
                 sourceLayerId = layer.id.raw.takeIf { origin.endsWith(".psd", true) && layer.idIsStable && it.startsWith("lyid:") &&
                     art.warnings.none { warning -> warning.startsWith("Duplicate PSD layer ID") } },

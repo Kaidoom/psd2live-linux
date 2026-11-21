@@ -11,7 +11,7 @@ class WorkspaceMaterialReimportTest {
     private fun entry(name: String = "eye", id: String? = "lyid:1", group: String = "face") = WorkspaceMaterialFiles.Entry(
         name, listOf("character", group), MaterialKind.BITMAP, raster, LayerCanvasRect(1f, 2f, 2f, 2f),
         origin = "character.psd#${id ?: name}", fileFolder = 0, placementWidth = 100, placementHeight = 100,
-        sourcePath = root.sourcePath, sourceLayerId = id, sourceLayerPath = listOf(group, name))
+        sourceFileName = "character.psd", sourcePath = root.sourcePath, sourceLayerId = id, sourceLayerPath = listOf(group, name))
     private fun item(id: String, e: WorkspaceMaterialFiles.Entry) = MaterialItem(id, e.name, "group", e.kind, e.raster,
         e.placement, origin = e.origin, placementWidth = e.placementWidth, placementHeight = e.placementHeight,
         sourceLayerId = e.sourceLayerId, sourceLayerPath = e.sourceLayerPath)
@@ -115,14 +115,15 @@ class WorkspaceMaterialReimportTest {
         assertEquals(2, WorkspaceMaterialReimport.targets(duplicated, listOf(entry()), null).folders.size)
         assertNull(WorkspaceMaterialReimport.targets(duplicated, listOf(entry()), null).automatic)
         assertEquals("character (2)", WorkspaceMaterialReimport.separate(lib, listOf(entry()), null).single().folder.first())
-        val renamed = entry().copy(sourcePath = "/art/new.psd", origin = "new.psd#lyid:1", folder = listOf("new", "face"))
+        val renamed = entry().copy(sourcePath = "/art/new.psd", sourceFileName = "new.psd", origin = "new.psd#lyid:1", folder = listOf("new", "face"))
         assertEquals(root.id, WorkspaceMaterialReimport.targets(lib, listOf(renamed), null).folders.single().id)
         assertNull(WorkspaceMaterialReimport.targets(lib, listOf(renamed), null).automatic)
     }
 
     @Test fun nestedIndependentPsdAndOtherImageImportsAreNotMatched() {
         val e = entry()
-        val lib = library(item("a", e), item("nested", e).copy(folderId = "nested"), item("png", e).copy(origin = "eye.png"))
+        val png = item("png", e).copy(origin = "character.psd#eye.png", placement = null, sourceLayerPath = null, sourceLayerId = null)
+        val lib = library(item("a", e), item("nested", e).copy(folderId = "nested"), png)
             .let { it.copy(folders = it.folders + root.copy(id = "nested", parentId = "group")) }
         assertEquals(listOf("a"), WorkspaceMaterialReimport.sourceItems(lib, root.id).map { it.id })
     }
@@ -139,6 +140,35 @@ class WorkspaceMaterialReimportTest {
         assertEquals(setOf(root.id, "group"), cleaned.layout.materials.folders.map { it.id }.toSet())
         assertEquals(layout.layerMaterials, cleaned.layout.layerMaterials)
         assertEquals(layout.references, cleaned.layout.references)
+    }
+
+    @Test fun cleanupKeepsPreExistingEmptyFoldersAndPrunesOnlyNewlyEmptiedAncestors() {
+        val folders = listOf(root, MaterialFolder("unused", "Unused", root.id), MaterialFolder("leaf", "Leaf", "unused"),
+            MaterialFolder("costumes", "Future costumes", root.id), MaterialFolder("reserved", "Reserved", "costumes"))
+        val library = MaterialLibrary(folders, listOf(item("discard", entry()).copy(folderId = "leaf")))
+        val document = Characters.figure().copy(layout = WorkspaceLayout(materials = library))
+        val cleaned = WorkspaceMaterialEdits.deleteUnused(document, root.id)
+        assertEquals(listOf(root.id, "costumes", "reserved"), cleaned.layout.materials.folders.map { it.id })
+        assertSame(cleaned, WorkspaceMaterialEdits.deleteUnused(cleaned, root.id))
+    }
+
+    @Test fun truncatedSavedSourcesMatchWithoutLosingHashesInFilenamesOrLayerIds() {
+        val filename = "Character.psd#2.PSD"
+        val layerName = "Eye#Left"
+        val incoming = entry(layerName, id = null).copy(sourceFileName = filename, origin = "$filename#$layerName#3",
+            sourcePath = "/moved/$filename")
+        val original = item("eye", incoming).copy(sourceLayerId = null, sourceLayerPath = null)
+        for (savedPath in listOf("", "C:\\Art\\$filename")) {
+            val folder = root.copy(name = filename.substringBeforeLast('.'), origin = "Character.psd", sourcePath = savedPath)
+            val stored = MaterialLibrary(listOf(folder, MaterialFolder("group", "face", folder.id)), listOf(original))
+            val encoded = WorkspaceLayoutCodec.encodeMaterials(stored) { "pixels" }
+            val library = WorkspaceLayoutCodec.decode(null, encoded) { _, _, _ -> raster.rgba }.materials
+            assertEquals(filename, library.sourceFileName(library.folders.first()))
+            assertEquals(filename, library.sourceFileName(original))
+            assertEquals("$layerName#3", library.originLayerId(original))
+            assertEquals(folder.id, WorkspaceMaterialReimport.targets(library, listOf(incoming), null).folders.single().id)
+            assertEquals(mapOf(0 to "eye"), plan(library, incoming).resolve(emptyMap(), false))
+        }
     }
 
     @Test fun sourceMetadataRoundTripsAndOldProjectsNeedNoMigration() {

@@ -36,7 +36,7 @@ internal object RigSourceMeasurements {
         val stages = meshCache?.stages?.takeIf { RigStageCache.enabled }
         if (stages != null && analysis.calibration == null) {
             val key = listOf(analysis.source, analysis.layers, analysis.anchors, analysis.warnings,
-                config.meshTrace, config.visiblePixelMeshLayers, MeshResolution.unitScale(config, analysis.source),
+                config.meshTrace, config.meshAlphaCoverage, config.visiblePixelMeshLayers, MeshResolution.unitScale(config, analysis.source),
                 config.alphaThreshold, RigMeshSeed.layers(config.rigEdits), resolution.partByLayer,
                 analysis.layers.map { meshSettings(it, config).first })
             return stages.get("framed analysis", 16, key) {

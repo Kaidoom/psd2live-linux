@@ -420,6 +420,7 @@ internal object WorkspaceStateCodec {
         }) } }
         put("activeWorkspaceId", state.activeWorkspaceId)
         put("outputPath", state.outputPath)
+        state.externalPsdPath?.let { put("externalPsdPath", it) }
         put("atlasSize", state.atlasSize)
         put("textureUpscale", Json.encodeToJsonElement(state.textureUpscale))
         put("meshSpacing", state.meshSpacing)
@@ -434,6 +435,7 @@ internal object WorkspaceStateCodec {
         put("meshUnits", state.meshUnits.name)
         if (state.meshTrace != io.github.psd2live.core.MeshTrace.CANVAS) put("meshTrace", state.meshTrace.name)
         if (state.visiblePixelMeshLayers.isNotEmpty()) put("visiblePixelMeshLayers", JsonArray(state.visiblePixelMeshLayers.sorted().map(::JsonPrimitive)))
+        if (state.meshAlphaCoverage) put("meshAlphaCoverage", true)
         if (state.meshWrap != 0f) put("meshWrap", state.meshWrap)
         putJsonObject("meshOverrides") {
             state.meshOverrides.toSortedMap().forEach { (k, v) ->
@@ -535,6 +537,7 @@ internal object WorkspaceStateCodec {
         val (workspaces, activeWorkspaceId) = decodeWorkspaces(value, base)
         return base.copy(
         projectSourceName = value["projectSourceName"]?.jsonPrimitive?.contentOrNull ?: base.projectSourceName,
+        externalPsdPath = value["externalPsdPath"]?.jsonPrimitive?.contentOrNull ?: base.externalPsdPath,
         historyZoom = value["historyZoom"]?.jsonPrimitive?.float ?: base.historyZoom,
         historyPanX = value["historyPanX"]?.jsonPrimitive?.float ?: base.historyPanX,
         historyPanY = value["historyPanY"]?.jsonPrimitive?.float ?: base.historyPanY,
@@ -575,6 +578,8 @@ internal object WorkspaceStateCodec {
             ?: if ("meshSpacing" in value) io.github.psd2live.core.MeshTrace.CANVAS else base.meshTrace,
         visiblePixelMeshLayers = if ("visiblePixelMeshLayers" in value || "meshSpacing" in value)
             io.github.psd2live.project.WorkspaceSettingsCodec.visiblePixelMeshLayers(value) else base.visiblePixelMeshLayers,
+        meshAlphaCoverage = value["meshAlphaCoverage"]?.jsonPrimitive?.booleanOrNull
+            ?: if ("meshSpacing" in value) false else base.meshAlphaCoverage,
         meshWrap = value["meshWrap"]?.let(io.github.psd2live.project.WorkspaceSettingsCodec::decodeWrap)
             ?: if ("meshSpacing" in value) 0f else base.meshWrap,
         meshOverrides = value["meshOverrides"]?.jsonObject?.mapNotNull { (k, v) ->

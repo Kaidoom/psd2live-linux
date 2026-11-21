@@ -1,5 +1,8 @@
 package io.github.psd2live.core
 
+import org.umamo.format.art.LayerRaster
+import org.umamo.format.art.SourceLayer
+import org.umamo.runtime.model.DrawableMesh
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
@@ -13,6 +16,24 @@ import kotlin.math.min
 internal object MeshCoverage {
     /** Cells per side the layer's raster is sampled at, at most. */
     private const val GRID = 384
+
+    /** Test only pixels revealed by the new artwork, using each linked mesh's own UVs and the source raster's resolution. */
+    fun newlyUncovered(model: RigPreviewModel, layer: SourceLayer, updated: LayerRaster, threshold: Int,
+                       checkpoint: () -> Unit): Boolean {
+        val space = LayerSpace.of(layer)
+        val meshes = model.rig.puppet.drawables.mapNotNull { drawable ->
+            if (model.rig.ownLayerIdByDrawableId[drawable.id.raw] != layer.id.raw) return@mapNotNull null
+            val mesh = drawable.mesh ?: return@mapNotNull null
+            val pixels = RasterMeshJournal.TextureCoordinates(model.rig.puppet, drawable).toCanvas(mesh.uvs)
+            for (i in pixels.indices step 2) {
+                pixels[i] = space.canvasToRasterX(pixels[i])
+                pixels[i + 1] = space.canvasToRasterY(pixels[i + 1])
+            }
+            DrawableMesh(pixels, mesh.uvs, mesh.indices)
+        }
+        return meshes.isEmpty() || (RasterMeshCoverage.uncovered(updated.width, updated.height, updated.rgba, meshes,
+            layer.raster.rgba, threshold, checkpoint) ?: 0f) > 0f
+    }
 
     /**
      * The share (0..1) of [layerId]'s visible pixels that none of its meshes covers, judged on the pixels the meshes'

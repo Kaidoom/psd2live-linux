@@ -500,9 +500,10 @@ internal object WorkspaceTextureEdits {
         val old = document.layout.layerMaterials[layer.id.raw]?.let(document.layout.materials::item)
         val frame = layer.canvasRect()
         val place = incoming.placement
-        val sameSourceLayer = (incoming.sourceLayerId ?: incoming.origin.substringAfter('#', "")) == layer.id.raw &&
+        val library = document.layout.materials
+        val sameSourceLayer = (incoming.sourceLayerId ?: library.originLayerId(incoming)) == layer.id.raw &&
             (layer as? WorkspaceSourceMetadata)?.derived != true && old != null &&
-            old.origin.substringBefore('#') == incoming.origin.substringBefore('#') &&
+            library.sourceFileName(old) == library.sourceFileName(incoming) &&
             (incoming.sourceLayerPath?.lastOrNull() ?: incoming.name) == layer.name
         if (place != null && sameSourceLayer && incoming.placementWidth > 0 && incoming.placementHeight > 0) {
             return WorkspaceMaterialEdits.fittedPlacement(incoming.placementWidth.toFloat(), incoming.placementHeight.toFloat(),

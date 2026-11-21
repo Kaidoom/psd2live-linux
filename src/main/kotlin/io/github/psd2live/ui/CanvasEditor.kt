@@ -1071,7 +1071,9 @@ internal class CanvasEditor(
             if (value != EditHierarchyMode.SELECT) lastWorkMode = value
             viewModel.switchHierarchyModeView(value, canvasId, workspaceId)
         }
-    var editLevel by mutableStateOf(2) // Level 1 (grid), Level 2 (bezier), Level 3 (macro)
+    /** A warp's deform levels switched on, at least one: 1 its lattice points, 2 its Bezier anchors and handles over them. */
+    var editLevels by mutableStateOf(setOf(2))
+        private set
 
     /** The mode Tab returns to from object mode: the last mode other than Select the canvas was in or asked for. */
     private var lastWorkMode = EditHierarchyMode.DEFORM
@@ -1441,6 +1443,7 @@ internal class CanvasEditor(
     var bezierState by mutableStateOf<BezierDeformerState?>(null)
     var activeBezierAnchor by mutableStateOf<Pair<Int, Int>?>(null)
     var activeBezierHandle by mutableStateOf<Triple<Int, Int, BezierHandleDir>?>(null)
+    private var activeBezierHandleStart: Offset? = null
     var hoveredBezierAnchor by mutableStateOf<Pair<Int, Int>?>(null)
     var hoveredBezierHandle by mutableStateOf<Triple<Int, Int, BezierHandleDir>?>(null)
 
@@ -1589,7 +1592,7 @@ internal class CanvasEditor(
     var space by mutableStateOf(false)
     var axis by mutableStateOf<String?>(null)
     private var deformationParameters by mutableStateOf<List<String>>(emptyList())
-    var snapDeformationToKeys by mutableStateOf(false)
+    var snapDeformationToKeys by mutableStateOf(true)
     var geometryEditStage by mutableStateOf("auto")
         private set
     private var capturedEditStage: String? = null
@@ -1618,6 +1621,11 @@ internal class CanvasEditor(
         val name = entry?.instance?.config?.get("name")?.jsonPrimitive?.contentOrNull ?: entry?.instance?.type ?: stage
         tr("editor.deformation.stage.after", name, stage.removePrefix("modifier:"))
     }
+    fun geometryEditStageDescription(stage: String): String = if (!stage.startsWith("modifier:")) tr("editor.deformation.stage.$stage.desc") else {
+        val entry = state.previewModel?.modifierEvaluation?.entries?.firstOrNull { it.instance.id == stage.removePrefix("modifier:") }
+        val name = entry?.instance?.config?.get("name")?.jsonPrimitive?.contentOrNull ?: entry?.instance?.type ?: stage
+        tr("editor.deformation.stage.after.desc", name, stage.removePrefix("modifier:"))
+    }
     fun changeGeometryEditStage(stage: String) {
         if (busy || dragging) return
         try {
@@ -1633,8 +1641,12 @@ internal class CanvasEditor(
         snapEditTargetsToNearestKeys(listOf(kind to id), onReady)
     private fun snapEditTargetsToNearestKeys(targets: List<Pair<String, String>>, onReady: () -> Unit): Boolean {
         val source = editSource ?: return true
-        val axes = targets.flatMap { (kind, id) -> source.keyformAxesFor(kind, id) }
-        return viewModel.snapAxesToNearestKeysOnModel(axes, source, onReady)
+        val targetAxes = targets.flatMap { (kind, id) -> source.keyformAxesFor(kind, id) }
+        val parameterAxes = source.parameterKeyMarks().mapNotNull { (parameterId, marks) ->
+            val keys = marks.allKeys
+            if (keys.isEmpty()) null else KeyformAxis(parameterId, keys.toFloatArray())
+        }
+        return viewModel.snapAxesToNearestKeysOnModel(targetAxes + parameterAxes, source, onReady)
     }
     var geometryCorrectionMode by mutableStateOf("delta")
     private var capturedCorrectionMode: String? = null
@@ -1670,6 +1682,13 @@ internal class CanvasEditor(
             (candidates.minByOrNull { (it - start).getDistance() } ?: start).also { snapAnchor = it }
         }
         return start + (snap(anchor + (pos - start)) - anchor)
+    }
+
+    /** With [shift], the drag keeps only the larger of its two screen components, as Cubism's Shift drag does. */
+    private fun straightened(pos: Offset, shift: Boolean): Offset {
+        if (!shift) return pos
+        val d = pos - start
+        return if (abs(d.x) >= abs(d.y)) Offset(pos.x, start.y) else Offset(start.x, pos.y)
     }
 
     /** Whether the pointer is over one of the editor's own handles, which a press takes before a guide. */
@@ -2864,7 +2883,7 @@ internal class CanvasEditor(
         glueStrokeA = emptySet()
         glueStrokeB = emptySet()
         poseDrag = null
-        activeBezierAnchor = null; activeBezierHandle = null
+        activeBezierAnchor = null; activeBezierHandle = null; activeBezierHandleStart = null
         activeBrushWeights = null; activeBrushCenter = null; endMeshStroke()
         marquee = emptyList(); draft = emptyList(); draftPathId = null; drawingPath = false
         pathDragging = false
@@ -3791,7 +3810,7 @@ internal class CanvasEditor(
         } else if (next == EditHierarchyMode.SELECT) {
             selection = emptyMap()
         } else if (next == EditHierarchyMode.DEFORM) {
-            if (editLevel == 2) ensureBezierState()
+            if (2 in editLevels) ensureBezierState()
         }
         if (tool !in palette()) {
             tool = if (next == EditHierarchyMode.SKELETON && committedSkeleton?.enabled != true) CanvasTool.SKELETON_EDIT else palette().first()
@@ -3803,17 +3822,24 @@ internal class CanvasEditor(
 
     /**
      * Whether the deform levels apply to the target in hand: only a warp has a lattice of its own for each, its grid
-     * points at level 1 and its Bezier handles at level 2; everything else deforms alike at either.
+     * points at level 1 and its Bezier handles over them at level 2, either alone or both together; everything else
+     * deforms alike at any.
      */
     fun deformLevelsShown(): Boolean = hierarchyMode == EditHierarchyMode.DEFORM && target()?.kind == "warp"
 
-    @JvmName("changeEditLevel")
-    fun setEditLevel(level: Int) {
-        editLevel = level
-        // The lattice's points take no edits at the Bezier level, so a selection of them would only be moved by
+    /** Switches to [level] alone, as the number keys do. */
+    fun setEditLevel(level: Int) = switchEditLevels(setOf(level))
+
+    /** Switches [level] on or off beside the other, as its button does; the last one on stays on. */
+    fun toggleEditLevel(level: Int) = switchEditLevels(if (level in editLevels) editLevels - level else editLevels + level)
+
+    private fun switchEditLevels(levels: Set<Int>) {
+        if (levels.isEmpty()) return
+        editLevels = levels
+        // The lattice's points take no edits without the vertex level, so a selection of them would only be moved by
         // the transform box unseen.
-        if (level == 2 && target()?.kind == "warp") selection = emptyMap()
-        if (level == 2 && hierarchyMode == EditHierarchyMode.DEFORM) {
+        if (1 !in levels && target()?.kind == "warp") selection = emptyMap()
+        if (2 in levels && hierarchyMode == EditHierarchyMode.DEFORM) {
             ensureBezierState()
         }
         clearHover()
@@ -4212,7 +4238,7 @@ internal class CanvasEditor(
 
         if (hierarchyMode == EditHierarchyMode.DEFORM) {
             if (t.kind == "warp") {
-                if (editLevel == 2) {
+                if (2 in editLevels) {
                     ensureBezierState()
                     val bState = bezierState
                     if (bState != null) {
@@ -4246,7 +4272,9 @@ internal class CanvasEditor(
                             return
                         }
                     }
-                    if (tool == CanvasTool.SELECT) {
+                    // Under the anchors and handles, the lattice points when the vertex level is on too.
+                    if (1 in editLevels) updatePointHover(pos, viewport, t)
+                    else if (tool == CanvasTool.SELECT) {
                         val frame = transformFrame(viewport)
                         hoveredHandle = if (frame != null) transformHandleAt(pos, frame) else BoundingHandle.NONE
                     }
@@ -4621,9 +4649,9 @@ internal class CanvasEditor(
         }
     }
 
-    /** The points a keyform tool keeps to: the picked ones, but none of a warp's at the Bezier level or of a rotation. */
+    /** The points a keyform tool keeps to: the picked ones, but none of a warp's without the vertex level or of a rotation. */
     private fun keyformPoints(t: CanvasTarget): Set<Int> =
-        if (t.kind == "rotation" || (t.kind == "warp" && editLevel != 1)) emptySet() else vertices
+        if (t.kind == "rotation" || (t.kind == "warp" && 1 !in editLevels)) emptySet() else vertices
 
     /** How many points the keyform tools would keep to: 0 when they write the whole shape. */
     fun keyformPointCount(): Int = keyformTarget()?.first?.let { keyformPoints(it).size } ?: 0
@@ -4815,7 +4843,7 @@ internal class CanvasEditor(
     private var temporaryWarpPressWorld: FloatArray? = null
 
     fun canBeginTemporaryWarp(): Boolean = hierarchyMode == EditHierarchyMode.DEFORM &&
-        target()?.let { it.kind == "mesh" || (it.kind == "warp" && editLevel == 1) } == true
+        target()?.let { it.kind == "mesh" || (it.kind == "warp" && 1 in editLevels) } == true
 
     /** Lays a [temporaryWarpDivisions] lattice over [carried] points of the target in hand (default the picked ones, or all). */
     fun beginTemporaryWarp(carried: Collection<Int>? = null) {
@@ -4928,8 +4956,8 @@ internal class CanvasEditor(
     /** Whether a drag of picked points carries the points around them: Deform's point tools with [softSelection] on. */
     fun softSelectionActive(): Boolean = softSelection && hierarchyMode == EditHierarchyMode.DEFORM &&
         (tool in SELECTION_TOOLS || tool == CanvasTool.TRANSFORM) &&
-        // A warp's lattice points are what it picks only at the vertex level; its Bezier handles take no soft drag.
-        target()?.let { it.kind != "warp" || editLevel == 1 } != false
+        // A warp's lattice points are what it picks only with the vertex level on; its Bezier handles take no soft drag.
+        target()?.let { it.kind != "warp" || 1 in editLevels } != false
 
     private var softReachKey: List<Any?>? = null
     private var softReach: Map<String, FloatArray> = emptyMap()
@@ -4944,7 +4972,7 @@ internal class CanvasEditor(
         val t = target()?.takeIf { it.kind != "rotation" } ?: return emptyMap()
         val picked = vertices
         if (picked.isEmpty()) return emptyMap()
-        val key = listOf(editSource, pose, viewport, softRadius, brushFalloff, picked, t.id, editLevel)
+        val key = listOf(editSource, pose, viewport, softRadius, brushFalloff, picked, t.id, editLevels)
         if (key != softReachKey) {
             softReach = mapOf(t.id to softSelectionWeights(screen(t.geometry.points, t, viewport), picked, (softRadius * viewport.scale).toFloat(), brushFalloff))
             softReachKey = key
@@ -5437,7 +5465,7 @@ internal class CanvasEditor(
             deferredMode = null
             hierarchyMode = returnMode
             if (returnMode == EditHierarchyMode.DEFORM) {
-                if (editLevel == 2) ensureBezierState()
+                if (2 in editLevels) ensureBezierState()
             }
         }
         tool = CanvasTool.SELECT
@@ -6499,7 +6527,7 @@ internal class CanvasEditor(
         }
 
         // 2. Level 2 Bezier Deformer in DEFORM mode
-        if (hierarchyMode == EditHierarchyMode.DEFORM && editLevel == 2) {
+        if (hierarchyMode == EditHierarchyMode.DEFORM && 2 in editLevels) {
             val t = target()
             if (t != null && t.kind == "warp") {
                 if (hoveredBezierHandle != null || hoveredBezierAnchor != null) {
@@ -6507,6 +6535,7 @@ internal class CanvasEditor(
                 }
                 if (hoveredBezierHandle != null) {
                     activeBezierHandle = hoveredBezierHandle
+                    activeBezierHandleStart = bezierState?.handles?.get(hoveredBezierHandle)?.let { screen(floatArrayOf(it.x, it.y), t, viewport)[0] }
                     targetAtPress = t
                     original = model
                     dragging = true
@@ -6521,9 +6550,9 @@ internal class CanvasEditor(
                 }
             }
         }
-        // At the Bezier level a warp is edited through its anchors and handles alone; the lattice under them is
+        // Without the vertex level a warp is edited through its anchors and handles alone; the lattice under them is
         // shown for reference and takes no edits.
-        val bezierOnly = hierarchyMode == EditHierarchyMode.DEFORM && editLevel == 2 && target()?.kind == "warp" &&
+        val bezierOnly = hierarchyMode == EditHierarchyMode.DEFORM && 1 !in editLevels && target()?.kind == "warp" &&
             tool !in CREATION_TOOLS
 
         // 2b. A corner badge picks the deformer it belongs to, in every mode.
@@ -6841,7 +6870,8 @@ internal class CanvasEditor(
         if (activeBezierHandle != null) {
             val (br, bc, dir) = activeBezierHandle!!
             val t = targetAtPress ?: return; val source = original ?: return
-            val (lx, ly) = local(pos, t, viewport)
+            val handleStart = activeBezierHandleStart ?: start
+            val (lx, ly) = local(handleStart + (straightened(pos, shift) - start), t, viewport)
             bezierState?.moveHandle(br, bc, dir, lx, ly, smooth = !alt)
             val warp = source.deformers.filterIsInstance<Deformer.Warp>().firstOrNull { it.id.raw == t.id } ?: return
             val evaluated = bezierState?.evaluateLattice(warp.rows, warp.columns)?.also { points ->
@@ -6859,7 +6889,8 @@ internal class CanvasEditor(
         if (activeBezierAnchor != null) {
             val (br, bc) = activeBezierAnchor!!
             val t = targetAtPress ?: return; val source = original ?: return
-            val (lx, ly) = local(pos, t, viewport)
+            val at = straightened(pos, shift)
+            val (lx, ly) = local(at, t, viewport)
             val (prevLx, prevLy) = local(previous, t, viewport)
             bezierState?.moveAnchor(br, bc, lx - prevLx, ly - prevLy)
             val warp = source.deformers.filterIsInstance<Deformer.Warp>().firstOrNull { it.id.raw == t.id } ?: return
@@ -6869,7 +6900,8 @@ internal class CanvasEditor(
             bezierSourcePoints = evaluated.copyOf()
             val cmd = RigBezierJournal.materialize(source, t.id, coordinate(t), pose,
                 RigBezierJournal.Controls(requireNotNull(bezierState), bezierResidual), preserveChildren = effectiveCtrl)
-            preview = RigAuthoringJournal.apply(source, cmd); pending = cmd; previous = pos
+            // The anchor moves by steps from the last point, so that point is the straightened one.
+            preview = RigAuthoringJournal.apply(source, cmd); pending = cmd; previous = at
             return
         }
 
@@ -6906,7 +6938,9 @@ internal class CanvasEditor(
         }
 
         val t = targetAtPress ?: return; val source = original ?: return
-        @Suppress("NAME_SHADOWING") val pos = snappedDrag(pos, t, viewport)
+        // Shift keeps a move straight; a box's scale and a rotation's arm already give it a meaning of their own.
+        val straight = shift && if (boxDrag) activeHandle == BoundingHandle.BODY else !(t.kind == "rotation" && vertices == setOf(1))
+        @Suppress("NAME_SHADOWING") val pos = snappedDrag(pos, t, viewport).let { if (straight) straightened(it, true) else it }
 
         try {
             if (boxDrag) {
@@ -7203,6 +7237,7 @@ internal class CanvasEditor(
         if (activeBezierAnchor != null || activeBezierHandle != null) {
             activeBezierAnchor = null
             activeBezierHandle = null
+            activeBezierHandleStart = null
             val cmd = pending
             if (moved && cmd != null) {
                 commit(cmd)

@@ -7,6 +7,11 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import org.umamo.format.art.LayerRaster
 import org.junit.jupiter.api.io.TempDir
+import io.github.psd2live.i18n.tr
+import org.umamo.format.art.SourceLayer
+import org.umamo.format.psd.PsdReader
+import org.umamo.format.psd.PsdWriter
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.*
 
@@ -16,7 +21,7 @@ class MaterialReimportControllerTest {
     @Test fun guidedProjectKeepsSourceMaterialsAndIndependentSplitParts(): Unit = runBlocking {
         PSD2LiveViewModel().use { vm -> DesktopWorkspace(vm, temp.resolve("guide-store")).use { workspace ->
             vm.attachWorkspace(workspace)
-            val psd = Characters.eyesPsd(temp)
+            val psd = Files.move(Characters.eyesPsd(temp), temp.resolve("Eyes#2.psd"))
             val guide = workspace.host.preparePsdGuide(psd)
             val split = guide.defaultSplits(guide.base).single()
             val candidate = guide.split(guide.base, listOf(split))
@@ -34,20 +39,27 @@ class MaterialReimportControllerTest {
             assertEquals(children.size, materials.distinct().size)
             assertTrue(original !in materials)
 
-            suspend fun reimport(updates: List<WorkspaceMaterialFiles.Entry>) {
-                workspace.applyDocumentEdits(workspace.stateToken()!!, "Reimport PSD", listOf(WorkspaceDocumentOperation(
-                    WorkspaceMaterialReimport.OP, req("folder_id" to folder.id, "staging" to WorkspaceMaterialStaging.stage(updates))
-                )), MutationAuthor.USER)
+            suspend fun reimport(): String {
+                vm.reimportPsd(folder.id, psd)
+                val settled = withTimeout(20_000) { vm.state.first { !it.canvasEditBusy } }
+                assertNull(settled.errorMessage)
+                return settled.statusText
             }
             val head = workspace.snapshot().historyHeadNodeId
-            reimport(entries)
+            val unchanged = tr("materials.reimport.completed", 0, 0, 0, 0)
+            assertEquals(unchanged, reimport())
             assertEquals(head, workspace.snapshot().historyHeadNodeId)
-            val changed = entries.map { entry ->
-                val rgba = entry.raster.rgba.copyOf()
+            val art = PsdReader.read(Files.readAllBytes(psd))
+            val recolored = art.layers.map { layer ->
+                val rgba = layer.raster.rgba.copyOf()
                 for (pixel in rgba.indices step 4) if (rgba[pixel + 3] != 0.toByte()) rgba[pixel] = rgba[pixel].inc()
-                entry.copy(raster = LayerRaster(entry.raster.width, entry.raster.height, rgba))
+                object : SourceLayer by layer { override val raster = LayerRaster(layer.raster.width, layer.raster.height, rgba) }
             }
-            reimport(changed)
+            Files.write(psd, PsdWriter.write(art.widthPx, art.heightPx, recolored, art.groups))
+            val changed = WorkspaceMaterialFiles.read(listOf(psd))
+            val changedParent = changed.single { it.name == library.item(original)!!.name }
+            val notice = tr("materials.reimport.retiredSources", changedParent.sourceLayerPath!!.joinToString(" / "))
+            assertContains(reimport(), notice)
             val after = assertNotNull(workspace.layoutState())
             assertEquals(library.items.map { it.id }, after.layout.materials.items.map { it.id })
             val top = after.layers.single { it.name == "top" }
@@ -56,7 +68,7 @@ class MaterialReimportControllerTest {
                 after.layout.materials.item(original)!!.raster.rgba)
             for (part in children) assertContentEquals(part.raster.rgba, after.layers.single { it.id == part.id }.raster.rgba)
             val updatedHead = workspace.snapshot().historyHeadNodeId
-            reimport(changed)
+            assertEquals(unchanged, reimport())
             assertEquals(updatedHead, workspace.snapshot().historyHeadNodeId)
         } }
     }
@@ -66,7 +78,7 @@ class MaterialReimportControllerTest {
             vm.setStateForTest(vm.state.value.copy(atlasSize = 512, exportMoc3 = false, generatePhysics = false))
             DesktopWorkspace(vm, temp.resolve("store")).use { workspace ->
                 vm.attachWorkspace(workspace)
-                val psd = Characters.headPsd(temp)
+                val psd = Files.move(Characters.headPsd(temp), temp.resolve("Character#2.psd"))
                 workspace.importPsd(psd.toString(), true)
                 vm.showWorkspace()
                 assertIs<FileDropIntent.ImportMaterials>(vm.fileDrops.resolve(CarriedFiles(listOf(psd.toFile())), 0f, 0f).first)

@@ -211,7 +211,9 @@ internal class MaterialController(
                 val context = kotlinx.coroutines.currentCoroutineContext()
                 io.github.psd2live.application.WorkspaceMaterialFiles.read(files.map { it.toAbsolutePath().normalize() }.distinct(), context::ensureActive)
             }
-            val layout = (workspace as? io.github.psd2live.application.WorkspaceReadPort)?.layoutState()?.layout ?: state().layout
+            val snapshot = (workspace as? io.github.psd2live.application.WorkspaceReadPort)?.layoutState()
+            val layout = snapshot?.layout ?: state().layout
+            val retiredMaterials = (snapshot?.deletedLayerIds ?: state().deletedLayerIds).mapNotNullTo(HashSet(), layout.layerMaterials::get)
             val library = layout.materials
             val used = io.github.psd2live.application.WorkspaceMaterialEdits.referencedMaterialIds(layout)
             if (asReference) {
@@ -223,15 +225,16 @@ internal class MaterialController(
             }
             require(entries.isNotEmpty() || reimportFolderId != null) { tr("materials.reimport.noLayers") }
             val groups = if (reimportFolderId != null) listOf(entries) else entries.groupBy { entry ->
-                entry.sourcePath.takeIf { entry.fileFolder >= 0 && entry.origin.substringBefore('#').endsWith(".psd", true) }
+                entry.sourcePath.takeIf { entry.isPsdLayer }
             }.values.toList()
             val staged = ArrayList<io.github.psd2live.application.WorkspaceMaterialFiles.Entry>()
             val operations = ArrayList<io.github.psd2live.application.WorkspaceDocumentOperation>()
             val reserved = HashSet<Pair<String?, List<String>>>()
+            val retiredSources = linkedSetOf<String>()
             var updated = 0; var added = 0; var retained = 0; var skipped = 0; var reimports = 0
             for (group in groups) {
-                val psd = reimportFolderId != null || group.firstOrNull()?.let { it.fileFolder >= 0 && it.origin.substringBefore('#').endsWith(".psd", true) } == true
-                val filename = group.firstOrNull()?.origin?.substringBefore('#') ?: files.single().fileName.toString()
+                val psd = reimportFolderId != null || group.firstOrNull()?.isPsdLayer == true
+                val filename = group.firstOrNull()?.sourceFileName ?: files.single().fileName.toString()
                 var target = reimportFolderId
                 if (psd && target == null) {
                     val candidates = io.github.psd2live.application.WorkspaceMaterialReimport.targets(library, group, folderId)
@@ -253,7 +256,13 @@ internal class MaterialController(
                         if (!decision.fitChangedBounds && resolved.any { (index, id) -> id in used && library.item(id)?.let {
                                 io.github.psd2live.application.WorkspaceMaterialReimport.changedBounds(it, plan.entries[index]) } == true })
                             put("adapt_changed_bounds", true)
-                        updated += plan.updated(resolved)
+                        val changes = plan.updates(resolved)
+                        updated += changes.size
+                        for ((index, id) in changes) {
+                            if (id in retiredMaterials) {
+                                retiredSources += plan.entries[index].sourceLayerPath?.joinToString(" / ") ?: plan.entries[index].name
+                            }
+                        }
                         added += resolved.values.count { it == io.github.psd2live.application.WorkspaceMaterialReimport.NEW }
                         skipped += resolved.values.count { it == io.github.psd2live.application.WorkspaceMaterialReimport.SKIP }
                         retained += plan.retained(resolved)
@@ -272,7 +281,12 @@ internal class MaterialController(
             val token = io.github.psd2live.application.WorkspaceMaterialStaging.stage(staged, allowEmpty = reimportFolderId != null)
             val summary = if (reimports > 0) tr("materials.reimport.completed", updated, added, retained, skipped) else tr("materials.imported", added)
             workspace.applyDocumentEdits(expectedState, summary, operations.map { it.copy(request = JsonObject(it.request + ("staging" to JsonPrimitive(token)))) },
-                MutationAuthor.USER).also { setStatus(summary) }
+                MutationAuthor.USER).also {
+                    val notice = retiredSources.takeIf { it.isNotEmpty() }?.let {
+                        tr("materials.reimport.retiredSources", it.joinToString(", "))
+                    }
+                    setStatus(if (notice == null) summary else "$notice $summary")
+                }
         }
     }
 

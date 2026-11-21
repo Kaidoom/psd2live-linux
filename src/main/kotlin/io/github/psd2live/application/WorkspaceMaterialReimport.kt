@@ -1,5 +1,6 @@
 package io.github.psd2live.application
 
+import io.github.psd2live.core.MeshCoverage
 import io.github.psd2live.core.LayerImageReplace
 import io.github.psd2live.core.RigPreviewModel
 import io.github.psd2live.project.*
@@ -44,22 +45,22 @@ internal object WorkspaceMaterialReimport {
         }
 
         fun retained(resolved: Map<Int, String>): Int = items.count { it.id !in resolved.values }
-        fun updated(resolved: Map<Int, String>): Int {
+        fun updates(resolved: Map<Int, String>): Map<Int, String> {
             val byId = items.associateBy { it.id }
-            return resolved.count { (index, id) -> byId[id]?.let { changedBounds(it, entries[index]) || !WorkspaceMaterialLinks.shows(it.raster, entries[index].raster) } == true }
+            return resolved.filter { (index, id) -> byId[id]?.let { changedBounds(it, entries[index]) || !WorkspaceMaterialLinks.shows(it.raster, entries[index].raster) } == true }
         }
     }
 
     data class Targets(val folders: List<MaterialFolder>, val automatic: String? = null)
 
-    fun isPsdFolder(folder: MaterialFolder): Boolean = folder.origin.endsWith(".psd", ignoreCase = true)
+    fun isPsdFolder(library: MaterialLibrary, folder: MaterialFolder): Boolean = library.sourceFileName(folder).endsWith(".psd", ignoreCase = true)
 
     /** A nested imported file is a different source, even when the user moved it beneath this PSD folder. */
     fun sourceItems(library: MaterialLibrary, folderId: String): List<MaterialItem> {
         val scope = library.subtree(folderId)
-        val nested = library.folders.filter { it.id != folderId && it.id in scope && isPsdFolder(it) }
+        val nested = library.folders.filter { it.id != folderId && it.id in scope && isPsdFolder(library, it) }
             .flatMapTo(HashSet()) { library.subtree(it.id) }
-        return library.items.filter { it.folderId in scope && it.folderId !in nested && it.origin.substringBefore('#').endsWith(".psd", true) }
+        return library.items.filter { it.folderId in scope && it.folderId !in nested && library.sourceFileName(it).endsWith(".psd", true) }
     }
 
     fun relativeFolders(entry: WorkspaceMaterialFiles.Entry): List<String> = entry.folder.drop(entry.fileFolder + 1)
@@ -67,19 +68,19 @@ internal object WorkspaceMaterialReimport {
     private fun path(library: MaterialLibrary, folderId: String, item: MaterialItem): List<String> =
         item.sourceLayerPath ?: (library.ancestry(item.folderId).takeWhile { it.id != folderId }.reversed().map { it.name } + item.name)
 
-    private fun legacyId(item: MaterialItem): String? = item.origin.substringAfter('#', "").takeIf { it.matches(Regex("lyid:[0-9]+")) }
+    private fun legacyId(item: MaterialItem): String? = item.origin.substringAfterLast('#', "").takeIf { it.matches(Regex("lyid:[0-9]+")) }
     private fun stableId(item: MaterialItem): String? = item.sourceLayerId ?: legacyId(item).takeIf { item.sourceLayerPath == null }
 
     /** Exact source paths win; legacy filenames can auto-match, while changed/uncertain sources need a choice. */
     fun targets(library: MaterialLibrary, entries: List<WorkspaceMaterialFiles.Entry>, destination: String?): Targets {
         val first = entries.first()
         val sourcePath = first.sourcePath
-        val filename = first.origin.substringBefore('#')
+        val filename = first.sourceFileName
         val scope = destination?.let(library::subtree)
-        val folders = library.folders.filter { isPsdFolder(it) && (scope == null || it.id in scope) }
+        val folders = library.folders.filter { isPsdFolder(library, it) && (scope == null || it.id in scope) }
         val exact = folders.filter { sourcePath.isNotEmpty() && it.sourcePath == sourcePath }
         if (exact.isNotEmpty()) return Targets(exact, exact.singleOrNull()?.id)
-        val named = folders.filter { it.origin == filename || it.name == first.folder.getOrNull(first.fileFolder) }
+        val named = folders.filter { library.sourceFileName(it) == filename || it.name == first.folder.getOrNull(first.fileFolder) }
         if (named.isNotEmpty()) return Targets(named, named.singleOrNull()?.takeIf { it.sourcePath.isEmpty() }?.id)
         val paths = entries.mapTo(HashSet(), ::path)
         val possible = folders.filter { folder -> sourceItems(library, folder.id).any { path(library, folder.id, it) in paths } }
@@ -88,9 +89,9 @@ internal object WorkspaceMaterialReimport {
 
     fun plan(library: MaterialLibrary, folderId: String, entries: List<WorkspaceMaterialFiles.Entry>, used: Set<String>): Plan {
         val folder = requireNotNull(library.folder(folderId)) { "PSD folder no longer exists: $folderId" }
-        require(isPsdFolder(folder)) { "Select an imported PSD folder" }
+        require(isPsdFolder(library, folder)) { "Select an imported PSD folder" }
         if (entries.isEmpty()) return Plan(folderId, entries, sourceItems(library, folderId), emptyMap(), emptyList(), used)
-        require(entries.isNotEmpty() && entries.all { it.fileFolder >= 0 && it.origin.substringBefore('#').endsWith(".psd", true) }) {
+        require(entries.all { it.isPsdLayer }) {
             "Reimport requires PSD layer entries"
         }
         require(entries.map { it.sourcePath to it.folder.take(it.fileFolder + 1) }.distinct().size == 1) { "Reimport one PSD at a time" }
@@ -171,6 +172,35 @@ internal object WorkspaceMaterialReimport {
         return entries.map { it.copy(folder = it.folder.toMutableList().also { path -> path[index] = name }) }
     }
 
+    /** Adds entries whose folder paths are relative to the selected PSD folder. */
+    fun addSourceItems(document: WorkspaceDocument, additions: List<WorkspaceMaterialFiles.Entry>,
+                       folderId: String, checkpoint: () -> Unit): WorkspaceDocument {
+        // Do not merge a source group into a nested, independently imported PSD container.
+        for (entry in additions) {
+            var parent: String? = folderId
+            for (name in entry.folder) {
+                val existing = document.layout.materials.folders.firstOrNull { it.parentId == parent && it.name == name } ?: break
+                require(!isPsdFolder(document.layout.materials, existing)) { "PSD group $name conflicts with another imported PSD folder; rename or move that folder first" }
+                parent = existing.id
+            }
+        }
+        return WorkspaceMaterialEdits.add(document, additions, folderId, checkpoint)
+    }
+
+    private fun hasNewlyVisiblePixels(item: MaterialItem, entry: WorkspaceMaterialFiles.Entry, threshold: Int,
+                                      checkpoint: () -> Unit): Boolean {
+        val before = item.raster.rgba
+        val after = entry.raster.rgba
+        val stride = entry.raster.width * 4
+        for (row in after.indices step stride) {
+            checkpoint()
+            for (alpha in row + 3 until row + stride step 4) {
+                if ((after[alpha].toInt() and 255) > threshold && (before[alpha].toInt() and 255) <= threshold) return true
+            }
+        }
+        return false
+    }
+
     fun apply(document: WorkspaceDocument, model: RigPreviewModel, request: JsonObject, work: WorkspaceRasterWork): WorkspaceDocument {
         val entries = WorkspaceMaterialStaging.entries(request)
         val folderId = request.getValue("folder_id").jsonPrimitive.content
@@ -181,6 +211,9 @@ internal object WorkspaceMaterialReimport {
         require(!(fit && adapt)) { "Choose one placement for changed artwork" }
         val resolved = plan.resolve(choices, fit, adapt)
         val refresh = mutableSetOf<String>()
+        val rebuild = mutableSetOf<String>()
+        val pending = WorkspaceLayoutPreview.pendingIds(document)
+        val threshold = if (model.config.meshAlphaCoverage) 0 else model.config.alphaThreshold
         var next = document
         val additions = ArrayList<WorkspaceMaterialFiles.Entry>()
         for ((index, entry) in entries.withIndex()) {
@@ -200,31 +233,46 @@ internal object WorkspaceMaterialReimport {
                             val layer = next.source.layers.single { it.id.raw == id }
                             val rect = WorkspaceTextureEdits.artworkPlacement(next, layer, updated)
                             next = LayerImageReplace.replace(next, id, entry.raster, LayerImageReplace.Fit.STRETCH, rect)
-                            if (next.layout.generation.generated && id !in WorkspaceLayoutPreview.pendingIds(next) &&
+                            if (next.layout.generation.generated && id !in pending &&
                                 id !in next.layout.referenceLayerIds) refresh += id
                         }
-                    } else if (!samePixels)
+                    } else if (!samePixels) {
+                        // A deliberate fit to changed bounds keeps its topology. A recolor or a mask which only
+                        // hides pixels also leaves the rig alone, even if its old mesh already clipped some art.
+                        if (item.id in plan.used && !changedBounds(item, entry) &&
+                            hasNewlyVisiblePixels(item, entry, threshold, work::checkpoint)) {
+                            for (id in WorkspaceMaterialLinks.users(next, item.id)) {
+                                if (id in pending || id in next.layout.referenceLayerIds) continue
+                                val layer = next.source.layers.single { it.id.raw == id }
+                                if (MeshCoverage.newlyUncovered(model, layer, entry.raster, threshold, work::checkpoint)) {
+                                    if (WorkspaceGenerationEdits.hasLiveSourceMesh(model, id)) refresh += id else rebuild += id
+                                }
+                            }
+                        }
                         next = WorkspaceMaterialPixels.replace(next, model, item, entry.raster)
+                    }
                     val current = next.layout.materials.item(target)!!
                     if (updated != current) next = next.copy(layout = next.layout.copy(materials = next.layout.materials.copy(
                         items = next.layout.materials.items.map { if (it.id == target) updated else it })))
                 }
             }
         }
-        // Do not merge a source group into a nested, independently imported PSD container.
-        for (entry in additions) {
-            var parent: String? = folderId
-            for (name in entry.folder) {
-                val existing = next.layout.materials.folders.firstOrNull { it.parentId == parent && it.name == name } ?: break
-                require(!isPsdFolder(existing)) { "PSD group $name conflicts with another imported PSD folder; rename or move that folder first" }
-                parent = existing.id
-            }
+        // The paint migration carries authored keyforms, weights, paths and glue. Modifier-owned meshes instead
+        // need their generator input refreshed and the sculpt transferred at the owning modifier stage.
+        for (id in rebuild) {
+            work.checkpoint()
+            val layer = next.source.layers.single { it.id.raw == id }
+            next = WorkspaceRasterEdits.prepare(next, WorkspaceRasterEdits.workingModel(next, model),
+                WorkspacePaintRaster(id, layer.raster, rebuildMesh = true, preserveSourceRaster = true,
+                    coverVisible = true, rect = layer.canvasRect()), work)
         }
-        if (refresh.isNotEmpty()) next = WorkspaceGenerationEdits.refreshArtwork(next, refresh)
-        if (additions.isNotEmpty()) next = WorkspaceMaterialEdits.add(next, additions, folderId, work::checkpoint)
+        if (refresh.isNotEmpty()) {
+            next = WorkspaceArtworkRemesh.transfer(WorkspaceGenerationEdits.refreshArtwork(next, refresh), model, work::checkpoint)
+        }
+        if (additions.isNotEmpty()) next = addSourceItems(next, additions, folderId, work::checkpoint)
         val source = entries.withIndex().firstOrNull { resolved[it.index] != SKIP }?.value ?: return next
         val folder = next.layout.materials.folder(folderId)!!
-        val updatedFolder = folder.copy(origin = source.origin.substringBefore('#'), sourcePath = source.sourcePath)
+        val updatedFolder = folder.copy(origin = source.sourceFileName, sourcePath = source.sourcePath)
         if (updatedFolder != folder) next = next.copy(layout = next.layout.copy(materials = next.layout.materials.copy(
             folders = next.layout.materials.folders.map { if (it.id == folderId) updatedFolder else it })))
         return next

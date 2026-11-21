@@ -443,8 +443,9 @@ internal object RasterPaintCommit {
 
         // A transparent source layer has no drawable yet. Generate its first mesh in the old
         // rig's frames, then carry only its new objects into the otherwise preserved puppet.
+        val creationThreshold = if (currentPreview.config.meshAlphaCoverage) 0 else currentPreview.config.alphaThreshold
         if (targetDrawable == null && finalTargetClassified != null &&
-            (0 until newRaster.width * newRaster.height).any { (newRaster.rgba[it * 4 + 3].toInt() and 255) > currentPreview.config.alphaThreshold }) {
+            (0 until newRaster.width * newRaster.height).any { (newRaster.rgba[it * 4 + 3].toInt() and 255) > creationThreshold }) {
             val stable = RigBuilder.assignSplitDrawableIds(effectiveAnalysis,
                 currentPreview.stableLayerIdByDrawableId.entries.associate { it.value to DrawableId(it.key) })
             val generated = RigBuilder.buildPreservingDeformers(effectiveAnalysis, newAtlas, currentPreview.config, null,

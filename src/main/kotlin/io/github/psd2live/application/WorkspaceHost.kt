@@ -345,6 +345,45 @@ internal class WorkspaceHost<V>(
         result.mutation("Imported layout ${input.fileName}")
     }
 
+    override suspend fun reloadPsd(state: String, path: String): WorkspaceMutationResult {
+        val initial = runtime.capture()
+        requireExpected(state, initial)
+        val input = Path.of(path).toAbsolutePath().normalize()
+        val originalPath = io.github.psd2live.project.OwnedProjectSource.resolve(workspaceStore.root, initial.auxiliary)
+        val sources = runInterruptible(Dispatchers.IO) {
+            require(originalPath != null && originalPath.fileName.toString().endsWith(".psd", true) &&
+                input.fileName.toString().endsWith(".psd", true) && Files.isRegularFile(input)) {
+                io.github.psd2live.i18n.tr("psdReload.sourceRequired")
+            }
+            val original = org.umamo.format.psd.PsdReader.read(Files.readAllBytes(originalPath))
+            val incoming = org.umamo.format.psd.PsdReader.read(Files.readAllBytes(input))
+            original to incoming
+        }
+        return editMutex.withLock {
+            val before = captureForMutation()
+            requireExpected(state, before)
+            val current = presentation.current()
+            val author = mutationAuthor(MutationAuthor.AGENT)
+            if (current.facts().generating || current.facts().saving || recoveringProjectId != null ||
+                (current.facts().analyzing && author != MutationAuthor.USER)) throw WorkspaceBusy()
+            require(io.github.psd2live.project.OwnedProjectSource.resolve(workspaceStore.root, before.auxiliary) == originalPath) {
+                io.github.psd2live.i18n.tr("psdReload.sourceRequired")
+            }
+            val context = currentCoroutineContext()
+            val summary = io.github.psd2live.i18n.tr("psdReload.completed")
+            val result = documentCommands.executeCandidate(before.projectId, before.state, summary, author,
+                mutation = { document, model -> WorkspacePsdReload.prepare(document, model, sources.first, sources.second) { context.ensureActive() } },
+                beforeCommit = { _, document, model -> showCommit(model, document, summary, current) })
+            if (result.applied) {
+                scheduleHistoryPersistence(before.projectId)
+                presentation.historyChanged(history())
+                presentation.modelPublished(result.capture.model)
+            }
+            WorkspaceMutationResult(result.capture.historyHead, result.capture.revision, emptyList(), summary,
+                applied = result.applied, state = result.capture.state, projectId = result.capture.projectId)
+        }
+    }
+
     /** The settings a new source starts from: the open project's, without an imported model's switched-off generation. */
     private fun sourceConfig(state: WorkspaceRuntimeState<io.github.psd2live.core.RigPreviewModel>, current: V) =
         io.github.psd2live.core.Cmo3ModelImport.generationRestored(state.capture?.document?.rawConfig() ?: presentation.config(current))
@@ -1693,7 +1732,7 @@ internal class WorkspaceHost<V>(
         val before = captureForMutation()
         val current = presentation.current()
         val selected = runtime.checkout(before.projectId, before.state, nodeId) { _, document, model ->
-            showCommit(model, document, "Checked out history node $nodeId", current, restoreCheckedOutPose = true, base = null)
+            showCommit(model, document, "Checked out history node $nodeId", current, base = null)
         }
         discardEditorQueues()
         scheduleHistoryPersistence(before.projectId)
@@ -1820,9 +1859,8 @@ internal class WorkspaceHost<V>(
         next: WorkspaceDocument,
         status: String,
         view: V = presentation.current(),
-        restoreCheckedOutPose: Boolean = false,
         base: WorkspaceDocument? = runtime.capture().document,
-    ) = presentation.show(view, preview, base, next, status, restoreCheckedOutPose)
+    ) = presentation.show(view, preview, base, next, status)
 
     private val repository = io.github.psd2live.project.ProjectRepository()
     private val saves = Mutex()

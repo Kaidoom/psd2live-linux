@@ -19,7 +19,7 @@ class PreviewMeshCache(private val capacity: Int = 1024) {
 
     private data class Key(
         val width: Int, val height: Int, val digest: String,
-        val threshold: Int, val settings: MeshSettings, val unitScale: Float, val detail: Float, val coverVisible: Boolean,
+        val threshold: Int, val settings: MeshSettings, val unitScale: Float, val detail: Float, val coverAllAlpha: Boolean, val coverVisible: Boolean,
     )
 
     private val lock = Any()
@@ -28,9 +28,9 @@ class PreviewMeshCache(private val capacity: Int = 1024) {
 
     internal fun generate(
         width: Int, height: Int, rgba: ByteArray, alphaThreshold: Int, settings: MeshSettings,
-        unitScale: Float = 1f, detail: Float = 1f, coverVisible: Boolean = false,
+        unitScale: Float = 1f, detail: Float = 1f, coverAllAlpha: Boolean = false, coverVisible: Boolean = false,
     ): AdaptiveMeshGenerator.Result? {
-        val key = key(width, height, rgba, alphaThreshold, settings, unitScale, detail, coverVisible)
+        val key = key(width, height, rgba, alphaThreshold, settings, unitScale, detail, coverAllAlpha, coverVisible)
         while (true) {
             var owned: CompletableFuture<AdaptiveMeshGenerator.Result?>? = null
             val waiting = synchronized(lock) {
@@ -49,7 +49,7 @@ class PreviewMeshCache(private val capacity: Int = 1024) {
             try {
                 if (Thread.currentThread().isInterrupted) throw InterruptedException()
                 val result = RigBuildProfile.stage("mesh cache: adaptive mesh (miss)") {
-                    AdaptiveMeshGenerator.generate(width, height, rgba, alphaThreshold, settings, unitScale, detail, coverVisible)
+                    AdaptiveMeshGenerator.generate(width, height, rgba, alphaThreshold, settings, unitScale, detail, coverAllAlpha, coverVisible)
                 }
                 synchronized(lock) {
                     entries[key] = result
@@ -74,7 +74,7 @@ class PreviewMeshCache(private val capacity: Int = 1024) {
     internal fun prefetch(inputs: List<Pair<MeshResolution.Input, MeshSettings>>, alphaThreshold: Int) {
         val missing = LinkedHashMap<Key, Pair<MeshResolution.Input, MeshSettings>>()
         for ((input, settings) in inputs) {
-            val key = key(input.width, input.height, input.rgba, alphaThreshold, settings, input.unitScale, input.detail, input.coverVisible)
+            val key = key(input.width, input.height, input.rgba, alphaThreshold, settings, input.unitScale, input.detail, input.coverAllAlpha, input.coverVisible)
             if (synchronized(lock) { entries.containsKey(key) || key in pending }) continue
             missing.putIfAbsent(key, input to settings)
         }
@@ -83,7 +83,7 @@ class PreviewMeshCache(private val capacity: Int = 1024) {
         val tasks = missing.values.map { (input, settings) ->
             CompletableFuture.runAsync({
                 if (!cancelled.get()) runCatching {
-                    generate(input.width, input.height, input.rgba, alphaThreshold, settings, input.unitScale, input.detail, input.coverVisible)
+                    generate(input.width, input.height, input.rgba, alphaThreshold, settings, input.unitScale, input.detail, input.coverAllAlpha, input.coverVisible)
                 }
             }, workers)
         }
@@ -104,14 +104,14 @@ class PreviewMeshCache(private val capacity: Int = 1024) {
     }
 
     private fun key(
-        width: Int, height: Int, rgba: ByteArray, alphaThreshold: Int, settings: MeshSettings, unitScale: Float, detail: Float, coverVisible: Boolean,
+        width: Int, height: Int, rgba: ByteArray, alphaThreshold: Int, settings: MeshSettings, unitScale: Float, detail: Float, coverAllAlpha: Boolean, coverVisible: Boolean,
     ): Key {
         // Content addressed; rasters are never edited in place (every producer fills a new array), so each
         // array is hashed once ([RasterDigest]).
         val digest = RigBuildProfile.stage("mesh cache: raster digest") {
             if (RigStageCache.enabled) RasterDigest.of(rgba) else RasterDigest.compute(rgba)
         }
-        return Key(width, height, digest, alphaThreshold, settings, unitScale, detail, coverVisible)
+        return Key(width, height, digest, alphaThreshold, settings, unitScale, detail, coverAllAlpha, coverVisible)
     }
 
     private fun AdaptiveMeshGenerator.Result.detached() = copy(

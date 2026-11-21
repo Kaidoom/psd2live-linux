@@ -4,6 +4,7 @@ import io.github.psd2live.application.*
 import io.github.psd2live.bridge.PuppetIr
 import kotlinx.serialization.json.*
 import io.github.psd2live.core.*
+import io.github.psd2live.core.modifier.RigModifierStack
 import io.github.psd2live.project.*
 import org.junit.jupiter.api.io.TempDir
 import org.umamo.format.art.*
@@ -17,7 +18,7 @@ class ArtworkRemeshScenario {
     @TempDir lateinit var temp: Path
 
     /** A soft iris grows and moves in its PSD. The other eye and its rig provide an independent reference. */
-    private fun writePsd(updated: Boolean): Path {
+    private fun writePsd(updated: Boolean, reveal: Boolean = false): Path {
         val source = Characters.eyed().source
         val layers = source.layers.mapIndexed { index, layer ->
             val name = layer.name.replace("iris_", "irides-").replace("white_", "eyewhite-").replace("lash_", "eyelash-")
@@ -30,7 +31,7 @@ class ArtworkRemeshScenario {
                     val radius = hypot((x + .5 - w / 2) / (w * .44), (y + .5 - h / 2) / (h * .44))
                     val o = (y * w + x) * 4
                     rgba[o] = (x * 3).toByte()
-                    rgba[o + 3] = ((1.0 - radius) * 1500).toInt().coerceIn(0, 255).toByte()
+                    rgba[o + 3] = if (reveal && x < w / 2 && y in 0..h / 2) 255.toByte() else ((1.0 - radius) * 1500).toInt().coerceIn(0, 255).toByte()
                 }
             })
             object : SourceLayer by layer {
@@ -67,6 +68,71 @@ class ArtworkRemeshScenario {
         assertEquals(parent, puppet.drawables.single { it.id.raw == id }.parentDeformerId)
         assertEquals(0f, MeshCoverage.uncovered(now.model, layer.id.raw))
         assertTrue(motion(id, "ParamIrisSculpt", 1f) > .01)
+    }
+
+    @Test fun revealInsideOriginalBoundsPreservesAuthoredPoseThroughUndoAndReopen() = Studio.run(temp, checks = emptySet()) {
+        val path = writePsd(false)
+        importPsd(path, PipelineConfig(atlasSize = 512, generatePhysics = false))
+        val layer = now.document.source.layers.single { it.name == "irides-l" }
+        val sourceId = layer.id.raw
+        val id = mesh(sourceId)
+        fun geometry() = puppet.drawables.single { it.id.raw == id }.mesh!!
+        val axes = puppet.drawables.single { it.id.raw == id }.geometryGrid!!.axes.associate { axis ->
+            axis.parameterId.raw to puppet.parameters.single { it.id == axis.parameterId }.default
+        }
+        edits("sculpt iris", "parameter_create" to req("parameter_id" to "ParamCustom", "name" to "Pose",
+            "min" to 0, "max" to 1, "kind" to "blend_shape"),
+            "rig_deform" to req("changes" to listOf(mapOf("target" to "mesh:$id", "key" to axes + ("ParamCustom" to 1),
+                "operations" to listOf(mapOf("type" to "scale", "factors" to listOf(1.1, 1.1)))))))
+        val original = geometry()
+        val folder = now.document.layout.materials.folders.single { it.origin == path.fileName.toString() }
+        fun reimport(entry: WorkspaceMaterialFiles.Entry) = edit("reimport iris", WorkspaceMaterialReimport.OP,
+            req("folder_id" to folder.id, "staging" to WorkspaceMaterialStaging.stage(listOf(entry))))
+        val originalEntry = WorkspaceMaterialFiles.read(listOf(path)).single { it.name == layer.name }
+        val expanded = WorkspaceMaterialFiles.read(listOf(writePsd(false, reveal = true))).single { it.name == layer.name }
+        assertEquals(originalEntry.placement, expanded.placement)
+        reimport(expanded)
+        val grown = geometry()
+        assertFalse(original.positions.contentEquals(grown.positions))
+        assertEquals(0f, MeshCoverage.uncovered(now.model, sourceId))
+        assertContentEquals(expanded.raster.rgba, now.document.source.layers.single { it.id == layer.id }.raster.rgba)
+        assertTrue(motion(id, "ParamCustom", 1f) > .01)
+        undo()
+        assertContentEquals(original.positions, geometry().positions)
+        redo()
+        reopen()
+        assertContentEquals(grown.positions, geometry().positions)
+        assertTrue(motion(id, "ParamCustom", 1f) > .01)
+        val stable = now.historyHead
+        reimport(expanded)
+        assertEquals(stable, now.historyHead)
+        reimport(originalEntry)
+        assertContentEquals(originalEntry.raster.rgba, now.document.source.layers.single { it.id == layer.id }.raster.rgba)
+        assertContentEquals(grown.positions, geometry().positions, "Hiding pixels should retain the edited mesh")
+    }
+
+    @Test fun revealUpdatesBothInstancesOfASharedMaterialInOneEdit() = Studio.run(temp, checks = emptySet()) {
+        val path = writePsd(false)
+        importPsd(path, PipelineConfig(atlasSize = 512, generatePhysics = false))
+        val left = now.document.source.layers.single { it.name == "irides-l" }
+        val right = now.document.source.layers.single { it.name == "irides-r" }
+        val item = now.document.layout.layerMaterials.getValue(left.id.raw)
+        val folder = now.document.layout.materials.folders.single { it.origin == path.fileName.toString() }.id
+        edit("share iris", "layer_replace_image", req("layer_id" to right.id.raw, "material_id" to item))
+        val before = now
+        val updated = WorkspaceMaterialFiles.read(listOf(writePsd(false, reveal = true))).single { it.name == left.name }
+        edit("reimport shared material", WorkspaceMaterialReimport.OP,
+            req("folder_id" to folder, "staging" to WorkspaceMaterialStaging.stage(listOf(updated))))
+        for (id in listOf(left.id, right.id)) {
+            val previous = before.document.source.layers.single { it.id == id }
+            val current = now.document.source.layers.single { it.id == id }
+            assertEquals(item, now.document.layout.layerMaterials.getValue(id.raw))
+            assertEquals(previous.canvasRect(), current.canvasRect())
+            assertContentEquals(updated.raster.rgba, current.raster.rgba)
+            assertFalse(MeshCoverage.newlyUncovered(now.model, previous, current.raster, now.model.config.alphaThreshold) {})
+        }
+        undo()
+        assertEquals(before.document.layout.layerMaterials, now.document.layout.layerMaterials)
     }
 
     @Test fun changedPlacementAndSoftPixelsSurviveReimportReplacementAndColdRebuild() = Studio.run(temp, checks = emptySet()) {
@@ -142,6 +208,18 @@ class ArtworkRemeshScenario {
         reopen()
         expectUpdated()
         editedPose()
+
+        loadFixture(initial.copy(rigEdits = initial.rigEdits.copy(modifierStack = stack.toJson())))
+        val unmasked = WorkspaceMaterialFiles.read(listOf(writePsd(false, reveal = true))).single { it.name == layer.name }
+        edit("unmask the iris inside its original rectangle", WorkspaceMaterialReimport.OP, req("folder_id" to folder,
+            "staging" to WorkspaceMaterialStaging.stage(listOf(unmasked))))
+        assertEquals(0f, MeshCoverage.uncovered(now.model, layer.id.raw))
+        val unmaskedOverride = RigModifierStack.fromJson(now.document.rigEdits.modifierStack!!).overrides.getValue(owner).single()
+        assertNotEquals(correction["geometry_binding"], unmaskedOverride["geometry_binding"])
+        val points = unmaskedOverride.getValue("points").jsonArray
+        val basePoints = unmaskedOverride.getValue("base").jsonArray
+        for (i in points.indices) assertEquals(if (i % 2 == 0) .025f else 0f,
+            points[i].jsonPrimitive.float - basePoints[i].jsonPrimitive.float, .00001f)
 
         // The material menu uses the same placement even if the library item already has the new pixels.
         loadFixture(initial)

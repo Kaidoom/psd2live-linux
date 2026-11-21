@@ -15,7 +15,6 @@ internal object WorkspaceArtworkRemesh {
         WorkspaceRasterEdits.REBUILD_MESH -> true
         WorkspaceGenerationEdits.GENERATE -> edit.request["refresh_geometry"]?.jsonArray?.isNotEmpty()
             ?: document.layout.generation.refreshLayerIds.isNotEmpty()
-        WorkspaceMaterialReimport.OP -> edit.request["adapt_changed_bounds"]?.jsonPrimitive?.boolean == true
         "layer_replace_image" -> edit.request["fit"]?.jsonPrimitive?.content == "artwork" || edit.request["rebuild_mesh"]?.jsonPrimitive?.boolean == true
         else -> false
     }

@@ -56,7 +56,9 @@ import io.github.psd2live.ui.components.CompactTextField
 import io.github.psd2live.ui.components.ModalDialogFrame
 import io.github.psd2live.ui.components.IconAdd
 import io.github.psd2live.ui.components.IconChevron
+import io.github.psd2live.ui.components.IconCmo3
 import io.github.psd2live.ui.components.IconFolder
+import io.github.psd2live.ui.components.IconPsd
 import io.github.psd2live.ui.state.PSD2LiveState
 import io.github.psd2live.ui.state.FileDropIntent
 import io.github.psd2live.ui.state.PSD2LiveViewModel
@@ -186,7 +188,7 @@ private sealed interface MaterialEntry {
 }
 
 /** The kind of file a folder was read from, by its extension: "PSD", "CMO3", or null for a plain folder. */
-private fun fileKind(folder: MaterialFolder): String? = folder.origin.substringAfterLast('.', "").uppercase().takeIf { it == "PSD" || it == "CMO3" }
+private fun MaterialLibrary.fileKind(folder: MaterialFolder): String? = sourceFileName(folder).substringAfterLast('.', "").uppercase().takeIf { it == "PSD" || it == "CMO3" }
 
 /** A line of the material context menu. */
 internal sealed interface MenuLine {
@@ -427,7 +429,7 @@ internal fun MaterialsPanel(state: PSD2LiveState, vm: PSD2LiveViewModel) {
 								is TreeLine.Folder -> {
 									val folder = line.folder
 									var origin by remember { mutableStateOf(Offset.Zero) }
-									FolderRow(folder.name, fileKind(folder), line.depth + 1, folder.id == folderId, dropFolder == folder.id,
+									FolderRow(folder.name, library.fileKind(folder), line.depth + 1, folder.id == folderId, dropFolder == folder.id,
 										counts(folder.id) > 0, expanded[folder.id] != false,
 										track("tree:${folder.id}").onGloballyPositioned { origin = it.positionInRoot() },
 										{ folderId = folder.id; query = "" }, { expanded[folder.id] = expanded[folder.id] == false }, { at -> openMenu(folder.id, origin + at) })
@@ -522,7 +524,7 @@ internal fun MaterialsPanel(state: PSD2LiveState, vm: PSD2LiveViewModel) {
 				add(MenuLine.Section(item?.name ?: folder!!.name))
 				if (item != null) add(MenuLine.Action(tr("materials.menu.edit"), { close(); vm.openMaterialEditor(item.id) }, edits = false))
 				if (folder != null) add(MenuLine.Action(tr("materials.menu.open"), { close(); folderId = folder.id; query = "" },
-					trailing = fileKind(folder), edits = false))
+					trailing = library.fileKind(folder), edits = false))
 				val items = materialMenuItems(library, requireNotNull(target))
 				add(MenuLine.Action(tr("materials.menu.place"), { close(); vm.placeMaterial(target, reference = false) }, enabled = items.isNotEmpty()))
 				val layer = state.selectedLayerId?.takeIf { id -> id !in state.deletedLayerIds && state.analysis?.source?.layers?.any { it.id.raw == id } == true }
@@ -550,7 +552,7 @@ internal fun MaterialsPanel(state: PSD2LiveState, vm: PSD2LiveViewModel) {
 				add(MenuLine.Action(tr("materials.menu.defaultReference"), { close(); vm.markMaterialsReference(listOf(target), !allReference) },
 					enabled = items.isNotEmpty(), selected = allReference))
 				if (folder != null) {
-					if (io.github.psd2live.application.WorkspaceMaterialReimport.isPsdFolder(folder))
+					if (io.github.psd2live.application.WorkspaceMaterialReimport.isPsdFolder(library, folder))
 						add(MenuLine.Action(tr("materials.reimport.menu"), {
 							close()
 							NativeFilePicker.chooseReimportPsdFile(window, folder.sourcePath.takeIf { it.isNotEmpty() })
@@ -715,7 +717,11 @@ private fun FolderRow(name: String, kind: String?, depth: Int, selected: Boolean
 			if (hasChildren) IconChevron(open == true, Modifier.size(10.dp))
 		}
 		val tint = if (selected) colors.selectionText else colors.textMuted
-		if (kind != null) FileGlyph(Modifier.size(12.dp), tint) else IconFolder(Modifier.size(12.dp), tint)
+		when (kind) {
+			"PSD" -> IconPsd(Modifier.size(12.dp), tint)
+			"CMO3" -> IconCmo3(Modifier.size(12.dp), tint)
+			else -> IconFolder(Modifier.size(12.dp), tint)
+		}
 		Spacer(Modifier.width(4.dp))
 		Text(name, color = if (selected) colors.selectionText else colors.textPrimary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
 	}
@@ -752,7 +758,7 @@ private fun FolderFace(kind: String?, size: Dp, count: Int, dropping: Boolean) {
 	Box(Modifier.size(size).clip(RoundedCornerShape(3.dp)).background(colors.panelElevated.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
 		if (kind == null) IconFolder(Modifier.size(size * 0.45f), tint)
 		else {
-			val band = if (kind == "PSD") Color(0xFF3D8FD6) else Color(0xFFE08A3C)
+			val band = if (kind == "PSD") colors.accent else colors.warning
 			val page = size * 0.46f
 			Box(Modifier.size(page * 1.1f, page * 1.3f)) {
 				// The page behind: there is more inside.
@@ -786,8 +792,8 @@ private fun MaterialTile(entry: MaterialEntry, size: Dp, selected: Boolean, drop
 	val px = with(androidx.compose.ui.platform.LocalDensity.current) { size.roundToPx() }
 	val shape = RoundedCornerShape(5.dp)
 	val tip = when (entry) {
-		is MaterialEntry.Folder -> listOfNotNull(entry.folder.origin.takeIf { it.isNotEmpty() }, tr("materials.folder.openHint", count)).joinToString("\n")
-		is MaterialEntry.Item -> listOfNotNull(entry.name, "${entry.item.raster.width}×${entry.item.raster.height}", entry.item.origin.substringBefore('#').takeIf { it.isNotEmpty() },
+		is MaterialEntry.Folder -> listOfNotNull(state.layout.materials.sourceFileName(entry.folder).takeIf { it.isNotEmpty() }, tr("materials.folder.openHint", count)).joinToString("\n")
+		is MaterialEntry.Item -> listOfNotNull(entry.name, "${entry.item.raster.width}×${entry.item.raster.height}", state.layout.materials.sourceFileName(entry.item).takeIf { it.isNotEmpty() },
 			tr("materials.item.referenceHint").takeIf { entry.item.reference }, tr("materials.item.openHint")).joinToString("\n")
 	}
 	Column(target.padding(3.dp).clip(shape)
@@ -804,7 +810,7 @@ private fun MaterialTile(entry: MaterialEntry, size: Dp, selected: Boolean, drop
 			io.github.psd2live.ui.views.texture.BarTooltip(tip) {
 				when (entry) {
 					is MaterialEntry.Item -> MaterialThumbnail(entry.item.raster, px, Modifier.fillMaxSize().clip(RoundedCornerShape(3.dp)))
-					is MaterialEntry.Folder -> FolderFace(fileKind(entry.folder), size, count, dropping)
+					is MaterialEntry.Folder -> FolderFace(state.layout.materials.fileKind(entry.folder), size, count, dropping)
 				}
 			}
 			if (references.isNotEmpty()) MaterialUsageBadge(state, references, Modifier.align(Alignment.TopEnd).padding(3.dp))
@@ -834,7 +840,11 @@ private fun MaterialRow(entry: MaterialEntry, selected: Boolean, dropping: Boole
 		when (entry) {
 			is MaterialEntry.Item -> MaterialThumbnail(entry.item.raster, 48, Modifier.size(24.dp).clip(RoundedCornerShape(2.dp)))
 			is MaterialEntry.Folder -> Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-				if (fileKind(entry.folder) != null) FileGlyph(Modifier.size(16.dp), colors.textMuted) else IconFolder(Modifier.size(16.dp), colors.textMuted)
+				when (state.layout.materials.fileKind(entry.folder)) {
+					"PSD" -> IconPsd(Modifier.size(16.dp), colors.textMuted)
+					"CMO3" -> IconCmo3(Modifier.size(16.dp), colors.textMuted)
+					else -> IconFolder(Modifier.size(16.dp), colors.textMuted)
+				}
 			}
 		}
 		val text = if (selected) colors.selectionText else colors.textPrimary
@@ -848,7 +858,7 @@ private fun MaterialRow(entry: MaterialEntry, selected: Boolean, dropping: Boole
 				else Text(tr("materials.unused"), color = colors.textMuted, fontSize = 10.sp)
 			}
 			is MaterialEntry.Folder -> {
-				fileKind(entry.folder)?.let { Text(it, color = colors.textMuted, fontSize = 10.sp) }
+				state.layout.materials.fileKind(entry.folder)?.let { Text(it, color = colors.textMuted, fontSize = 10.sp) }
 				Text("$count", color = colors.textMuted, fontSize = 10.sp)
 				IconChevron(false, Modifier.size(10.dp), colors.textMuted)
 			}
@@ -897,11 +907,6 @@ internal fun MaterialDragGhost(vm: PSD2LiveViewModel) {
 	line(4f, 3f, 4f, 14f); line(4f, 8f, 8f, 8f); line(4f, 14f, 8f, 14f)
 	box(9f, 6f, 6f, 4f, 1f); box(9f, 12f, 6f, 4f, 1f)
 }
-/** A file: a page with its corner folded, for a folder read from a PSD or CMO3. */
-@Composable private fun FileGlyph(modifier: Modifier, tint: Color) = io.github.psd2live.ui.components.GridIcon(modifier, tint) {
-	shape(path { m(4f, 2f); l(11f, 2f); l(15f, 6f); l(15f, 16f); l(4f, 16f); z() })
-	outline(path { m(11f, 2f); l(11f, 6f); l(15f, 6f) })
-}
 
 /**
  * The mark of a layer showing a material: painting the layer paints the material, and the [shared] layers showing it
@@ -917,7 +922,7 @@ internal fun MaterialLinkChip(name: String, shared: Int, onOpen: () -> Unit, onU
 				LinkGlyph(colors.accent)
 			}
 		}
-		io.github.psd2live.ui.views.texture.FloatingMenu(expanded = open, onDismiss = { open = false }, width = 200.dp) {
+		io.github.psd2live.ui.views.texture.FloatingMenu(expanded = open, onDismiss = { open = false }) {
 			FloatingMenuSection(name)
 			FloatingMenuRow(tr("materials.menu.edit"), { open = false; onOpen() })
 			FloatingMenuRow(tr("materials.link.unlink"), { open = false; onUnlink() })
